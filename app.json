@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "name": "Lain IO",
+    "slug": "lain-io",
+    "scheme": "lainio",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "plugins": ["expo-apple-authentication", ["expo-asset", { "assets": ["./lain.glb"] }]],
+    "ios": { "supportsTablet": true, "usesAppleSignIn": true, "bundleIdentifier": "com.lainio.app" },
+    "android": { "package": "com.lainio.app" },
+    "web": { "bundler": "metro" }
+  }
+}
