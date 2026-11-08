@@ -1,0 +1,355 @@
+// Lain IO relay: a Gun peer plus the main relay's services.
+//
+//   wss://<host>/gun                 Gun sync (every relay)
+//   POST /lain/registrar/claim       first-come username registrar      (main relay only: REGISTRAR_PAIR set)
+//   POST /lain/registrar/release     owner releases a username
+//   POST /lain/recovery/send         email a recovery code (not stored) (needs SMTP_URL in production)
+//   POST /lain/account/purge         stop storing/serving a deleted account
+//   GET  /lain/health
+//
+// Enforcement (every relay running this file, community relays included):
+//   - drops writes and reads for banned or purged accounts and banned posts
+//   - strips banned posts from outgoing data
+//   - drops mail envelopes older than MAIL_RETENTION_DAYS
+//   - rejects oversized values
+//
+// Run a single registrar (one node). Other main-relay nodes can run without
+// REGISTRAR_PAIR and proxy /lain/registrar/* to it.
+
+'use strict';
+
+const fs = require('fs');
+const http = require('http');
+const path = require('path');
+const Gun = require('gun');
+const SEA = require('gun/sea');
+
+const RESERVED = new Set(['admin', 'administrator', 'root', 'system', 'support', 'help', 'security', 'staff', 'official',
+  'mod', 'moderator', 'moderation', 'laincorp', 'lain', 'lain_io', 'lainio', 'registrar', 'relay', 'null', 'undefined']);
+const validName = (name) => typeof name === 'string' && /^[a-z0-9_]{3,20}$/.test(name) && !RESERVED.has(name);
+const validEmail = (email) => typeof email === 'string' && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const parseSigned = (signed) => { try { return JSON.parse(String(signed).replace(/^SEA/, '')).m; } catch { return undefined; } };
+const pubOfSoul = (soul) => (typeof soul === 'string' && soul[0] === '~' && soul[1] !== '@' ? soul.slice(1).split('/')[0] : null);
+
+function readJson(file, fallback) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } }
+
+// ---------- enforcement middleware ----------
+
+const policies = new WeakMap();
+
+Gun.on('opt', function (root) {
+  this.to.next(root);
+  const policy = root.opt && root.opt.lainPolicy;
+  if (!policy || root.once || policies.has(root)) return;
+  policies.set(root, policy);
+
+  const soulBlocked = (soul) => {
+    const pub = pubOfSoul(soul);
+    if (pub && (policy.bannedPubs.has(pub) || policy.purged.has(pub))) return true;
+    const mail = /^lain-io\/mail\/(\d{4}-\d{2}-\d{2})\//.exec(soul || '');
+    if (mail && Date.parse(`${mail[1]}T00:00:00Z`) < Date.now() - policy.mailRetentionDays * 86_400_000) return true;
+    return false;
+  };
+  const keyBlocked = (soul, key) => {
+    const pub = pubOfSoul(soul);
+    return Boolean(pub && soul === `~${pub}/posts` && policy.bannedPosts.has(`${pub}|${key}`));
+  };
+  const tooBig = (val) => typeof val === 'string' && val.length > policy.maxValueBytes;
+
+  // Incoming: runs before Gun's own handler because 'opt' fires first.
+  root.on('in', function (msg) {
+    const put = msg && msg.put;
+    if (put) {
+      if (put['#'] && put['.'] !== undefined) {                           // single-key form
+        if (soulBlocked(put['#']) || keyBlocked(put['#'], put['.']) || tooBig(put[':'])) return;
+      } else {                                                             // graph form
+        for (const soul of Object.keys(put)) {
+          const node = put[soul];
+          if (soulBlocked(soul)) return;
+          for (const key of Object.keys(node || {})) {
+            if (key === '_') continue;
+            if (keyBlocked(soul, key) || tooBig(node[key])) return;
+          }
+        }
+      }
+    }
+    const get = msg && msg.get;
+    if (get && typeof get['#'] === 'string' && soulBlocked(get['#'])) return;
+    if (get && typeof get['#'] === 'string' && typeof get['.'] === 'string' && keyBlocked(get['#'], get['.'])) return;
+    this.to.next(msg);
+  });
+
+  // Outgoing: strip banned posts from replies we send to peers.
+  root.on('out', function (msg) {
+    const put = msg && msg.put;
+    if (put && !put['#']) {
+      // Graph nodes here can be Gun's live in-memory objects: filter into copies, never mutate.
+      let changed = false;
+      const filtered = {};
+      for (const soul of Object.keys(put)) {
+        if (soulBlocked(soul)) { changed = true; continue; }
+        const node = put[soul];
+        const keys = Object.keys(node || {}).filter((key) => key !== '_' && keyBlocked(soul, key));
+        if (!keys.length) { filtered[soul] = node; continue; }
+        changed = true;
+        const copy = { ...node, _: { ...(node._ || {}), '>': { ...((node._ || {})['>'] || {}) } } };
+        for (const key of keys) { delete copy[key]; delete copy._['>'][key]; }
+        filtered[soul] = copy;
+      }
+      if (changed) {
+        if (!Object.keys(filtered).length) return;
+        msg = { ...msg, put: filtered };
+      }
+    } else if (put && put['#'] && (soulBlocked(put['#']) || keyBlocked(put['#'], put['.']))) {
+      return;
+    }
+    this.to.next(msg);
+  });
+});
+
+// ---------- services ----------
+
+function json(res, status, body) {
+  res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+  res.end(JSON.stringify(body));
+}
+
+function readBody(req, limit = 16_384) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > limit) { reject(new Error('too large')); req.destroy(); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (error) { reject(error); } });
+    req.on('error', reject);
+  });
+}
+
+/** Verify a SEA-signed request made within the last 10 minutes. */
+async function verifyFresh(signed, pub) {
+  const data = await SEA.verify(signed, pub);
+  if (!data || typeof data !== 'object' || Math.abs(Date.now() - Number(data.at)) > 10 * 60_000) return null;
+  return data;
+}
+
+function rateLimiter() {
+  const hits = new Map();
+  return (key, max, windowMs) => {
+    const now = Date.now();
+    const list = (hits.get(key) || []).filter((t) => now - t < windowMs);
+    if (list.length >= max) { hits.set(key, list); return false; }
+    list.push(now);
+    hits.set(key, list);
+    return true;
+  };
+}
+
+function readOnce(node, ms = 3000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => finish(undefined), ms);
+    function finish(v) { if (done) return; done = true; clearTimeout(timer); resolve(v); }
+    node.once((v) => finish(v), { wait: 300 });
+  });
+}
+
+function putAck(node, value, ms = 5000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms); // no ack without storage or peers: treat as queued
+    node.put(value, (ack) => { clearTimeout(timer); if (ack && ack.err) reject(new Error(ack.err)); else resolve(); });
+  });
+}
+
+async function createMailer(options) {
+  if (!options.smtpUrl) return null;
+  // eslint-disable-next-line global-require
+  const nodemailer = require('nodemailer');
+  const transport = nodemailer.createTransport(options.smtpUrl);
+  return async ({ to, username, code }) => {
+    await transport.sendMail({
+      from: options.mailFrom,
+      to,
+      subject: 'Your Lain IO recovery code',
+      text: [
+        `Recovery code for @${username}:`,
+        '',
+        `    ${code}`,
+        '',
+        'Use it in the app (Sign in → Forgot password) to set a new password.',
+        'Anyone with this code can reset your password. Keep this email private, or delete it after saving the code.',
+        'If you didn’t ask for this, you can ignore it.',
+      ].join('\n'),
+    });
+  };
+}
+
+/**
+ * Start a relay. Options default to env vars; tests pass them directly.
+ * Returns { url, httpUrl, gun, server, close }.
+ */
+async function start(options = {}) {
+  const env = process.env;
+  const o = {
+    port: Number(options.port ?? env.PORT ?? 8765),
+    host: options.host ?? env.HOST ?? '0.0.0.0',
+    dataDir: options.dataDir ?? env.DATA_DIR ?? path.join(__dirname, 'data'),
+    peers: options.peers ?? (env.RELAY_PEERS || '').split(',').map((s) => s.trim()).filter(Boolean),
+    registrarPair: options.registrarPair ?? (env.REGISTRAR_PAIR ? JSON.parse(env.REGISTRAR_PAIR) : null),
+    moderationPub: options.moderationPub ?? env.MODERATION_PUB ?? '',
+    smtpUrl: options.smtpUrl ?? env.SMTP_URL ?? '',
+    mailFrom: options.mailFrom ?? env.MAIL_FROM ?? 'Lain IO <no-reply@lain.io>',
+    production: options.production ?? env.NODE_ENV === 'production',
+    mailRetentionDays: Number(options.mailRetentionDays ?? env.MAIL_RETENTION_DAYS ?? 30),
+    maxValueBytes: Number(options.maxValueBytes ?? env.MAX_VALUE_BYTES ?? 65_536),
+    persist: options.persist ?? true,
+    onMail: options.onMail, // tests: capture outgoing mail
+    log: options.log ?? console.log,
+  };
+  fs.mkdirSync(o.dataDir, { recursive: true });
+  const purgedFile = path.join(o.dataDir, 'purged.json');
+  const policy = {
+    bannedPubs: new Set(),
+    bannedPosts: new Set(),
+    purged: new Set(readJson(purgedFile, [])),
+    mailRetentionDays: o.mailRetentionDays,
+    maxValueBytes: o.maxValueBytes,
+  };
+  const limit = rateLimiter();
+  const mailer = o.onMail ? async (m) => o.onMail(m) : await createMailer(o);
+  const locks = new Map();
+  const withLock = (key, fn) => {
+    const prev = locks.get(key) || Promise.resolve();
+    const next = prev.then(fn, fn);
+    locks.set(key, next.catch(() => {}));
+    return next;
+  };
+
+  let gun;
+  const routes = {
+    'GET /lain/health': async () => [200, { ok: true, registrar: Boolean(o.registrarPair), moderation: Boolean(o.moderationPub) }],
+
+    'POST /lain/registrar/claim': async (body) => {
+      if (!o.registrarPair) return [404, { error: 'no registrar on this relay' }];
+      const unsigned = parseSigned(body.claim);
+      if (!unsigned || typeof unsigned.pub !== 'string') return [400, { error: 'bad claim' }];
+      const claim = await SEA.verify(body.claim, unsigned.pub);
+      if (!claim || claim.pub !== unsigned.pub || !validName(claim.name)) return [400, { error: 'bad claim' }];
+      if (!limit(`claim:${claim.pub}`, 10, 3_600_000)) return [429, { error: 'slow down' }];
+      return withLock(claim.name, async () => {
+        const node = gun.user().get('usernames').get(claim.name);
+        const existing = await readOnce(node);
+        let record; try { record = existing ? JSON.parse(existing) : null; } catch { record = null; }
+        if (record && record.pub !== claim.pub) return [409, { error: 'taken' }];
+        if (!record) await putAck(node, JSON.stringify({ pub: claim.pub, at: Date.now() }));
+        return [200, { ok: true }];
+      });
+    },
+
+    'POST /lain/registrar/release': async (body) => {
+      if (!o.registrarPair) return [404, { error: 'no registrar on this relay' }];
+      const unsigned = parseSigned(body.request);
+      const request = unsigned && (await verifyFresh(body.request, unsigned.pub));
+      if (!request || request.action !== 'release' || !validName(request.name)) return [400, { error: 'bad request' }];
+      return withLock(request.name, async () => {
+        const node = gun.user().get('usernames').get(request.name);
+        let record; try { record = JSON.parse(await readOnce(node)); } catch { record = null; }
+        if (!record || record.pub !== request.pub) return [403, { error: 'not the owner' }];
+        await putAck(node, null);
+        return [200, { ok: true }];
+      });
+    },
+
+    'POST /lain/recovery/send': async (body) => {
+      const request = typeof body.pub === 'string' && (await verifyFresh(body.request, body.pub));
+      if (!request || !validEmail(request.email) || !validName(request.username) || typeof request.code !== 'string') return [400, { error: 'bad request' }];
+      if (!limit(`mail-pub:${body.pub}`, 3, 3_600_000) || !limit(`mail-to:${request.email.toLowerCase()}`, 5, 86_400_000)) return [429, { error: 'slow down' }];
+      if (!mailer) {
+        if (o.production) return [503, { error: 'mail not configured' }];
+        o.log(`[relay] (dev, no SMTP) recovery code for @${request.username} <${request.email}>: ${request.code}`);
+        return [200, { ok: true, dev: true }];
+      }
+      await mailer({ to: request.email, username: request.username, code: request.code });
+      return [200, { ok: true }];
+    },
+
+    'POST /lain/account/purge': async (body) => {
+      const request = typeof body.pub === 'string' && (await verifyFresh(body.request, body.pub));
+      if (!request || request.action !== 'purge' || request.pub !== body.pub) return [400, { error: 'bad request' }];
+      policy.purged.add(body.pub);
+      fs.writeFileSync(purgedFile, JSON.stringify([...policy.purged]));
+      return [200, { ok: true }];
+    },
+  };
+
+  const server = http.createServer(async (req, res) => {
+    const route = `${req.method} ${(req.url || '').split('?')[0]}`;
+    if (req.method === 'OPTIONS' && (req.url || '').startsWith('/lain/')) {
+      res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST', 'access-control-allow-headers': 'content-type' });
+      res.end();
+      return;
+    }
+    const handler = routes[route];
+    if (!handler) {
+      if ((req.url || '').startsWith('/lain/')) { json(res, 404, { error: 'not found' }); return; }
+      if (Gun.serve) { Gun.serve(__dirname)(req, res); return; }
+      res.writeHead(404); res.end();
+      return;
+    }
+    try {
+      const body = req.method === 'POST' ? await readBody(req) : {};
+      const [status, payload] = await handler(body);
+      json(res, status, payload);
+    } catch (error) {
+      o.log('[relay] request failed', route, error && error.message);
+      json(res, 400, { error: 'bad request' });
+    }
+  });
+
+  await new Promise((resolve) => server.listen(o.port, o.host, resolve));
+  const port = server.address().port;
+
+  gun = Gun({
+    web: server,
+    peers: o.peers,
+    file: path.join(o.dataDir, 'radata'),
+    radisk: o.persist,
+    localStorage: false,
+    axe: false,
+    multicast: false,
+    lainPolicy: policy,
+  });
+
+  if (o.registrarPair) {
+    await new Promise((resolve, reject) => gun.user().auth(o.registrarPair, (ack) => (ack.err ? reject(new Error(ack.err)) : resolve())));
+  }
+
+  if (o.moderationPub) {
+    const mod = gun.get(`~${o.moderationPub}`).get('moderation');
+    const follow = (kind, set) => mod.get(kind).map().on((value, key) => { if (value) set.add(key); else set.delete(key); });
+    follow('pubs', policy.bannedPubs);
+    follow('posts', policy.bannedPosts);
+  }
+
+  o.log(`[relay] listening on ${port} · registrar ${o.registrarPair ? 'on' : 'off'} · moderation ${o.moderationPub ? 'on' : 'off'} · mail ${mailer ? 'on' : o.production ? 'OFF' : 'dev-log'}`);
+  return {
+    url: `http://127.0.0.1:${port}/gun`,
+    httpUrl: `http://127.0.0.1:${port}`,
+    gun,
+    policy,
+    server,
+    close: () => new Promise((resolve) => {
+      try { Object.values(gun.back('opt.peers') || {}).forEach((peer) => { try { peer.wire && peer.wire.close(); } catch { /* noop */ } }); } catch { /* noop */ }
+      server.closeAllConnections && server.closeAllConnections();
+      server.close(() => resolve());
+    }),
+  };
+}
+
+module.exports = { start };
+
+if (require.main === module) {
+  start().catch((error) => { console.error(error); process.exit(1); });
+}

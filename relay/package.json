@@ -1,0 +1,17 @@
+{
+  "name": "lain-io-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lain IO Gun relay with registrar, recovery mail, moderation enforcement and purge",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "keygen": "node tools/keygen.js",
+    "admin": "node tools/admin.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "gun": "0.2020.1241",
+    "nodemailer": "^6.9.16"
+  }
+}

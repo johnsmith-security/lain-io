@@ -12,3 +12,7 @@ web-build/
 *.orig.*
 ios/
 android/
+relay/keys/
+relay/data/
+relay/node_modules/
+relay/.env.relay

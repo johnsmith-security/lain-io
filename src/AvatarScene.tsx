@@ -4,7 +4,7 @@ import { File } from 'expo-file-system';
 import { GLView, ExpoWebGLRenderingContext } from 'expo-gl';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, LayoutChangeEvent, PixelRatio, StyleSheet, Text, View } from 'react-native';
 
 // Keep the asset reference static so Metro includes it in the native bundle.
 const LAIN_MODEL_ASSET = require('../lain.glb');
@@ -90,8 +90,13 @@ function applyVaporwaveMaterials(root: THREE.Object3D) {
   });
 }
 
-export default function AvatarScene() {
+type AvatarActivity = 'missing' | 'downloaded' | 'downloading' | 'loading' | 'ready' | 'thinking' | 'listening' | 'processing' | 'speaking' | 'error';
+
+export default function AvatarScene({ animationState = 'ready', stageHeight = 300, fill = false, visualStyle = 'vaporwave' }: { animationState?: AvatarActivity; stageHeight?: number; fill?: boolean; visualStyle?: 'vaporwave' | 'wired' }) {
   const frameRef = useRef<number | null>(null);
+  const pixelSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const animationStateRef = useRef(animationState);
+  const visualStyleRef = useRef(visualStyle);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [loadErrorMessage, setLoadErrorMessage] = useState('');
@@ -99,6 +104,9 @@ export default function AvatarScene() {
   useEffect(() => () => {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
   }, []);
+
+  useEffect(() => { animationStateRef.current = animationState; }, [animationState]);
+  useEffect(() => { visualStyleRef.current = visualStyle; }, [visualStyle]);
 
   const onContextCreate = async (gl: ExpoWebGLRenderingContext) => {
     // Expo GL supplies WebGL 1. Use Three.js r162, the last release line
@@ -123,25 +131,44 @@ export default function AvatarScene() {
 
     const renderer = new THREE.WebGLRenderer({ canvas, context: gl as any, antialias: true });
     renderer.setSize(gl.drawingBufferWidth, gl.drawingBufferHeight);
-    renderer.setClearColor(0x10091e, 1);
+    const viewport = { width: gl.drawingBufferWidth, height: gl.drawingBufferHeight };
+    let fitCamera: ((width: number, height: number) => void) | null = null;
+    // Expo GL's surface follows the view's layout, but three.js keeps the size it
+    // was created with. Track the layout (in physical pixels) and refit on change.
+    const syncViewport = () => {
+      const target = pixelSizeRef.current;
+      if (!target || (target.width === viewport.width && target.height === viewport.height)) return;
+      viewport.width = target.width;
+      viewport.height = target.height;
+      canvas.width = canvas.clientWidth = target.width;
+      canvas.height = canvas.clientHeight = target.height;
+      if (fitCamera) fitCamera(target.width, target.height);
+      else renderer.setViewport(0, 0, target.width, target.height);
+    };
+    const wiredLook = visualStyle === 'wired';
+    let lastVisualStyle = visualStyle;
+    const clearColor = wiredLook ? 0x07121c : 0x10091e;
+    renderer.setClearColor(clearColor, 1);
 
     const scene = new THREE.Scene();
-    scene.fog = new THREE.Fog(0x10091e, 7, 14);
+    scene.fog = new THREE.Fog(clearColor, 7, 14);
     const camera = new THREE.PerspectiveCamera(32, gl.drawingBufferWidth / gl.drawingBufferHeight, 0.01, 100);
     scene.add(new THREE.HemisphereLight(0xe9d5ff, 0x24143a, 2.1));
-    const key = new THREE.DirectionalLight(0xff9fea, 3.2);
+    const key = new THREE.DirectionalLight(wiredLook ? 0x8bb8c7 : 0xff9fea, 3.2);
     key.position.set(-3, 5, 5);
     scene.add(key);
-    const fill = new THREE.DirectionalLight(0x59f3ff, 1.8);
+    const fill = new THREE.DirectionalLight(wiredLook ? 0x63a6b8 : 0x59f3ff, 1.8);
     fill.position.set(3, 1, 4);
     scene.add(fill);
-    const rim = new THREE.PointLight(0x59f3ff, 15, 12);
+    const rim = new THREE.PointLight(wiredLook ? 0x498395 : 0x59f3ff, 15, 12);
     rim.position.set(3, 2, -2);
     scene.add(rim);
 
     const avatar = new THREE.Group();
     scene.add(avatar);
-    const grid = new THREE.GridHelper(12, 24, 0x913cbd, 0x30234f);
+    const grid = wiredLook
+      ? new THREE.GridHelper(12, 24, 0x34788a, 0x1b3544)
+      : new THREE.GridHelper(12, 24, 0x913cbd, 0x30234f);
     scene.add(grid);
 
     try {
@@ -180,21 +207,28 @@ export default function AvatarScene() {
       model.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
       model.updateWorldMatrix(true, true);
       const fittedBounds = new THREE.Box3().setFromObject(model);
-      const fittedSphere = fittedBounds.getBoundingSphere(new THREE.Sphere());
-      const aspect = gl.drawingBufferWidth / gl.drawingBufferHeight;
-      const verticalFov = THREE.MathUtils.degToRad(camera.fov);
-      const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
-      const limitingFov = Math.min(verticalFov, horizontalFov);
-      const distance = (fittedSphere.radius / Math.sin(limitingFov / 2)) * 1.2;
-      camera.position.set(
-        fittedSphere.center.x,
-        fittedSphere.center.y + fittedSphere.radius * 0.08,
-        fittedSphere.center.z + distance
-      );
-      camera.lookAt(fittedSphere.center);
-      camera.near = Math.max(distance - fittedSphere.radius * 2, 0.01);
-      camera.far = distance + fittedSphere.radius * 4;
-      camera.updateProjectionMatrix();
+      const fittedSize = fittedBounds.getSize(new THREE.Vector3());
+      const fittedCenter = fittedBounds.getCenter(new THREE.Vector3());
+      // The avatar spins around Y, so its on-screen width is bounded by the XZ radius.
+      const spinRadius = Math.hypot(fittedSize.x / 2, fittedSize.z / 2);
+      // Frame the model for the current viewport; re-run whenever the stage is resized
+      // (e.g. it grows to fill the screen while the keyboard is open).
+      fitCamera = (width: number, height: number) => {
+        renderer.setViewport(0, 0, width, height);
+        camera.aspect = width / height;
+        const verticalFov = THREE.MathUtils.degToRad(camera.fov);
+        const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * camera.aspect);
+        const distance = Math.max(
+          (fittedSize.y / 2) / Math.tan(verticalFov / 2),
+          spinRadius / Math.tan(horizontalFov / 2)
+        ) * 1.08 + spinRadius;
+        camera.position.set(fittedCenter.x, fittedCenter.y, fittedCenter.z + distance);
+        camera.lookAt(fittedCenter);
+        camera.near = Math.max(distance - spinRadius * 3, 0.01);
+        camera.far = distance + spinRadius * 8;
+        camera.updateProjectionMatrix();
+      };
+      fitCamera(viewport.width, viewport.height);
       grid.position.y = fittedBounds.min.y - 0.04;
       console.info(`[Lain model] ${meshCount} meshes; bounds ${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)}`);
       avatar.add(model);
@@ -202,10 +236,42 @@ export default function AvatarScene() {
       const clock = new THREE.Clock();
       const mixer = gltf.animations?.length ? new THREE.AnimationMixer(model) : null;
       mixer?.clipAction(gltf.animations[0]).play();
+      const head = model.getObjectByName('頭');
+      const neck = model.getObjectByName('首');
+      const leftArm = model.getObjectByName('腕.L');
+      const rightArm = model.getObjectByName('腕.R');
+      const baseRotations = [head, neck, leftArm, rightArm].map((bone) => bone?.rotation.clone());
       const render = () => {
         frameRef.current = requestAnimationFrame(render);
+        if (visualStyleRef.current !== lastVisualStyle) {
+          lastVisualStyle = visualStyleRef.current;
+          const useWiredLook = lastVisualStyle === 'wired';
+          const nextClear = useWiredLook ? 0x07121c : 0x10091e;
+          renderer.setClearColor(nextClear, 1);
+          (scene.fog as THREE.Fog).color.setHex(nextClear);
+          key.color.setHex(useWiredLook ? 0x8bb8c7 : 0xff9fea);
+          fill.color.setHex(useWiredLook ? 0x63a6b8 : 0x59f3ff);
+          rim.color.setHex(useWiredLook ? 0x498395 : 0x59f3ff);
+          const gridColors = useWiredLook ? [0x34788a, 0x1b3544] : [0x913cbd, 0x30234f];
+          const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
+          gridMaterials.forEach((material, index) => material.color?.setHex(gridColors[index % 2]));
+        }
+        const delta = clock.getDelta();
+        const t = clock.elapsedTime;
+        const currentState = animationStateRef.current;
+        const listening = currentState === 'listening' || currentState === 'processing';
+        const thinking = currentState === 'thinking';
+        const speaking = currentState === 'speaking';
+        if (head && baseRotations[0]) {
+          head.rotation.x = baseRotations[0].x + Math.sin(t * (speaking ? 5 : 1.5)) * (speaking ? 0.08 : 0.025);
+          head.rotation.z = baseRotations[0].z + (listening ? -0.12 : thinking ? 0.09 : 0) + Math.sin(t * 0.8) * 0.018;
+        }
+        if (neck && baseRotations[1]) neck.rotation.z = baseRotations[1].z + (listening ? -0.08 : thinking ? 0.06 : 0) + Math.sin(t * 1.2) * 0.012;
+        if (leftArm && baseRotations[2]) leftArm.rotation.x = baseRotations[2].x + (speaking ? Math.sin(t * 4) * 0.06 : 0);
+        if (rightArm && baseRotations[3]) rightArm.rotation.x = baseRotations[3].x + (speaking ? Math.sin(t * 4 + 1.2) * 0.06 : 0);
         avatar.rotation.y += 0.0025;
-        mixer?.update(clock.getDelta());
+        mixer?.update(delta);
+        syncViewport();
         renderer.render(scene, camera);
         gl.endFrameEXP();
       };
@@ -218,6 +284,7 @@ export default function AvatarScene() {
       setLoadErrorMessage(error instanceof Error ? error.message.slice(0, 100) : String(error).slice(0, 100));
       const render = () => {
         frameRef.current = requestAnimationFrame(render);
+        syncViewport();
         renderer.render(scene, camera);
         gl.endFrameEXP();
       };
@@ -225,7 +292,13 @@ export default function AvatarScene() {
     }
   };
 
-  return <View style={styles.stage}>
+  const onLayout = (event: LayoutChangeEvent) => {
+    const { width, height } = event.nativeEvent.layout;
+    const ratio = PixelRatio.get();
+    if (width > 0 && height > 0) pixelSizeRef.current = { width: Math.round(width * ratio), height: Math.round(height * ratio) };
+  };
+
+  return <View onLayout={onLayout} style={[styles.stage, fill ? styles.fillStage : { height: stageHeight }]}>
     <GLView style={styles.gl} onContextCreate={onContextCreate} />
     {isLoading && <View pointerEvents="none" style={styles.loading}><ActivityIndicator color="#59f3ff" /><Text style={styles.loadingText}>LOADING MODEL</Text></View>}
     {loadError && <View pointerEvents="none" style={styles.error}><Text style={styles.errorText}>Couldn’t load lain.glb</Text><Text style={styles.errorDetail}>{loadErrorMessage}</Text></View>}
@@ -233,7 +306,8 @@ export default function AvatarScene() {
 }
 
 const styles = StyleSheet.create({
-  stage: { height: 300, overflow: 'hidden', borderRadius: 18 },
+  stage: { overflow: 'hidden', borderRadius: 18 },
+  fillStage: { flex: 1, borderRadius: 0 },
   gl: { flex: 1 },
   loading: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, alignItems: 'center', justifyContent: 'center', gap: 8 },
   loadingText: { fontSize: 8, letterSpacing: 1.6, color: '#59f3ff', fontWeight: '700' },

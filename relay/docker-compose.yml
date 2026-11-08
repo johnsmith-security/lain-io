@@ -1,0 +1,15 @@
+# Local Lain IO relay for device testing.
+#   node tools/keygen.js            (from the app folder: node relay/tools/keygen.js)
+#   docker compose up --build
+services:
+  relay:
+    build: .
+    container_name: lain-relay
+    ports:
+      - "8765:8765"
+    env_file: .env.relay      # REGISTRAR_PAIR, MODERATION_PUB (written by tools/dev-setup.js)
+    environment:
+      NODE_ENV: development   # no SMTP: recovery codes are printed in `docker compose logs`
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
