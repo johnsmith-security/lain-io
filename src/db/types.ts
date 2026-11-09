@@ -23,7 +23,7 @@ export type Profile = {
   username: string;
   name: string;
   bio: string;
-  /** URL or content hash of the avatar image; empty when unset. */
+  /** Public image URL or compact data URL, synced with the profile; empty when unset. */
   avatar: string;
   accent: string;
   updatedAt: number;
@@ -34,14 +34,50 @@ export type Profile = {
 /** A post reference: `<authorPub>/<postId>`. Stable across edits. */
 export type PostRef = string;
 
+/**
+ * An uploaded image or video. Gun stores only this; the bytes live on the main
+ * relay's media store (IPFS) under `sha` (SHA-256 hex of the file).
+ * Show it with `db.media.url(sha)`; while it loads, or after it expires, show `thumb` blurred.
+ */
+export type MediaRef = {
+  sha: string;
+  mime: string;
+  size: number;
+  width?: number;
+  height?: number;
+  /** Video length in seconds. */
+  duration?: number;
+  /** Tiny JPEG data URL (≈24 px wide) for the blurred placeholder. */
+  thumb?: string;
+  /** IPFS CID, so any IPFS gateway that still has the file can serve it. */
+  cid?: string;
+  /** Adult content: flagged by the relay's scanner or by the uploader. Blurred unless settings.showSensitiveMedia. */
+  sensitive?: boolean;
+};
+
+/** An encrypted attachment for direct messages. The key travels only inside the Signal message. */
+export type PrivateMediaRef = MediaRef & { key: string; iv: string; plainMime: string };
+
+export type MediaStatus = 'live' | 'expired' | 'deleted' | 'banned' | 'missing';
+export type MediaInfo = { sha: string; status: MediaStatus; size?: number; mime?: string; cid?: string; expiresAt?: number | null; kept?: boolean };
+
+/** Preview of an external video link (YouTube, PeerTube) or plain link, captured when posting. */
+export type LinkPreview = { url: string; provider: 'youtube' | 'peertube' | 'link'; title: string; author?: string; thumbnail?: string };
+
 export type Post = {
   ref: PostRef;
   id: string;
   author: string;
+  /** May be empty when the post has media, a link, or is a repost. */
   body: string;
   createdAt: number;
   editedAt?: number;
   replyTo?: PostRef;
+  /** Up to 4 images, or 1 video. Banned files are already removed. */
+  media?: MediaRef[];
+  link?: LinkPreview;
+  /** Set on reposts: the original post. Show it with `usePost(post.repostOf)`. */
+  repostOf?: PostRef;
 };
 
 export type Settings = {
@@ -52,6 +88,8 @@ export type Settings = {
   showActivity: boolean;
   readReceipts: boolean;
   typingIndicators: boolean;
+  /** Show media flagged as adult content without blurring. Off by default; the GUI should confirm 18+ before enabling. */
+  showSensitiveMedia: boolean;
   /** Extra relay URLs added by the user (merged with the configured peers). */
   relays: string[];
   updatedAt: number;

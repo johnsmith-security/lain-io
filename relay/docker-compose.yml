@@ -1,6 +1,11 @@
 # Local Lain IO relay for device testing.
-#   node tools/keygen.js            (from the app folder: node relay/tools/keygen.js)
-#   docker compose up --build
+#   node relay/tools/dev-setup.js      (from the app folder)
+#   docker compose up --build -d
+#
+# relay  Gun sync + services on :8765 (the phone reaches it via `adb reverse tcp:8765 tcp:8765`)
+# ipfs   Kubo node that stores images and videos. Its API (5001) stays on the
+#        internal network: only the relay talks to it. Swarm port 4001 lets other
+#        IPFS nodes fetch pinned files by CID.
 services:
   relay:
     build: .
@@ -9,7 +14,31 @@ services:
       - "8765:8765"
     env_file: .env.relay      # REGISTRAR_PAIR, MODERATION_PUB (written by tools/dev-setup.js)
     environment:
-      NODE_ENV: development   # no SMTP: recovery codes are printed in `docker compose logs`
+      NODE_ENV: development   # no SMTP: recovery codes in `docker compose logs`; uploads unscanned
+      IPFS_API: http://ipfs:5001
+      # MEDIA_TTL_DAYS: 30
+      # MEDIA_KEEP_SCORE: 50
+      # SCANNER_URL: http://scanner:8080/scan
     volumes:
       - ./data:/data
+    depends_on:
+      ipfs:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ipfs:
+    image: ipfs/kubo:v0.43.1
+    container_name: lain-ipfs
+    environment:
+      IPFS_PROFILE: server    # don't scan the local network for peers
+    ports:
+      - "4001:4001"
+      - "4001:4001/udp"
+    volumes:
+      - ./ipfs:/data/ipfs
+    healthcheck:
+      test: ["CMD", "ipfs", "id"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped

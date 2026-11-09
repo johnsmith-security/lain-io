@@ -84,6 +84,23 @@ export function useLikes(ref: PostRef) {
   return { ...state, toggle };
 }
 
+/** Repost count and toggle for a post. */
+export function useReposts(ref: PostRef) {
+  const db = dbOrNull();
+  const state = useLive({ count: 0, repostedByMe: false }, db ? (set) => db.social.subscribeReposts(ref, set) : null, [db, ref]);
+  const toggle = useCallback(async () => {
+    if (!db) return;
+    if (state.repostedByMe) await db.social.unrepost(ref); else await db.social.repost(ref);
+  }, [db, ref, state.repostedByMe]);
+  return { ...state, toggle };
+}
+
+/** One post, live (e.g. the original inside a repost). null while loading, deleted, or hidden. */
+export function usePost(ref: PostRef | undefined): Post | null {
+  const db = dbOrNull();
+  return useLive<Post | null>(null, db && ref ? (set) => db.social.subscribePost(ref, set) : null, [db, ref]);
+}
+
 export function useProfile(pub: string | null): Profile | null {
   const db = dbOrNull();
   return useLive<Profile | null>(null, db && pub ? (set) => db.profiles.subscribe(pub, set) : null, [db, pub]);

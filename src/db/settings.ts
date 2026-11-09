@@ -14,6 +14,7 @@ export const DEFAULT_SETTINGS: Settings = {
   showActivity: true,
   readReceipts: false,
   typingIndicators: false,
+  showSensitiveMedia: false,
   relays: [],
   updatedAt: 0,
 };

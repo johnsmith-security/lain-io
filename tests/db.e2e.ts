@@ -41,7 +41,7 @@ async function rejects(name: string, p: Promise<unknown>, type?: new (...a: any[
 const platform = (): Platform => ({ kv: memoryKV(), secure: memorySecure(), persistGun: false, fetch: globalThis.fetch.bind(globalThis) });
 
 async function main() {
-  setTimeout(() => { console.log(`\nGLOBAL TIMEOUT · ${passes} passed, ${failures} failed`); process.exit(2); }, 240_000).unref();
+  setTimeout(() => { console.log(`\nGLOBAL TIMEOUT · ${passes} passed, ${failures} failed`); process.exit(2); }, 360_000).unref();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lain-relay-'));
   const registrar = await SEA.pair();
   const moderation = await SEA.pair();
@@ -50,6 +50,11 @@ async function main() {
   const relay = await relayModule.start({
     port: 0, host: '127.0.0.1', dataDir, persist: true, registrarPair: registrar, moderationPub: moderation.pub,
     onMail: (m: any) => mails.push(m), log: () => {},
+    // media: fake scanner (rejects one known-bad file, flags "adult" ones), low keep threshold, manual retention
+    scan: async (buf: Buffer) => ({ ok: !buf.includes(Buffer.from('KNOWN-BAD')), adult: buf.includes(Buffer.from('ADULT')) }),
+    keepScore: 3, retentionIntervalMs: 0,
+    fetchJson: async (url: string) => (url.startsWith('https://www.youtube.com/oembed')
+      ? { title: 'Serial Experiments', author_name: 'wired', thumbnail_url: 'https://i.ytimg.com/vi/x/hqdefault.jpg' } : {}),
   });
   const config = {
     peers: [relay.url], serviceUrl: relay.httpUrl, registrarPub: registrar.pub,
@@ -196,6 +201,85 @@ async function main() {
   await alice5.signIn({ username: 'alice', password: 'recovered-password-1' });
   check('the recovered password works on a new device', alice5.session?.pub === alice.session!.pub);
 
+  console.log('\nMedia');
+  const jpeg = (tag: string) => new Uint8Array(Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from(`${tag}-${Math.random()}`), Buffer.alloc(2048, 7)]));
+  const mp4 = () => new Uint8Array(Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.alloc(4096, 3)]));
+  const fetchStatus = async (url: string) => (await fetch(url)).status;
+  const imgA = jpeg('a');
+  const refA = await alice.media.upload(imgA, { mime: 'image/jpeg', width: 640, height: 480, thumb: 'data:image/jpeg;base64,AAAA' });
+  check('upload returns the content hash', /^[0-9a-f]{64}$/.test(refA.sha) && refA.size === imgA.length);
+  const served = new Uint8Array(await (await fetch(alice.media.url(refA.sha))).arrayBuffer());
+  check('the relay serves the same bytes', Buffer.from(served).equals(Buffer.from(imgA)));
+  const partial = await fetch(alice.media.url(refA.sha), { headers: { range: 'bytes=0-9' } });
+  check('range requests work (video seeking)', partial.status === 206 && (await partial.arrayBuffer()).byteLength === 10);
+  await rejects('a file whose content doesn’t match its type is refused', alice.media.upload(jpeg('x'), { mime: 'image/png' }));
+  await rejects('the scanner blocks known-bad files', alice.media.upload(jpeg('KNOWN-BAD'), { mime: 'image/jpeg' }));
+  const adult = await alice.media.upload(jpeg('ADULT'), { mime: 'image/jpeg' });
+  check('scanner-flagged adult files come back sensitive', adult.sensitive === true);
+  const marked = await alice.media.upload(jpeg('self-marked'), { mime: 'image/jpeg', sensitive: true });
+  check('uploaders can mark their own files sensitive', marked.sensitive === true);
+  check('sensitive media is hidden by default in settings', alice.settings.get().showSensitiveMedia === false);
+  const video = await alice.media.upload(mp4(), { mime: 'video/mp4', duration: 12 });
+  check('videos upload', video.mime === 'video/mp4');
+
+  const link = await alice.media.linkPreview('https://youtu.be/abc123');
+  check('YouTube links get a preview from the relay', link.provider === 'youtube' && link.title === 'Serial Experiments' && Boolean(link.thumbnail));
+  const popular = await alice.social.createPost('a meme', { media: [refA], link });
+  const imgB = jpeg('b');
+  const refB = await alice.media.upload(imgB, { mime: 'image/jpeg' });
+  const ignored = await alice.social.createPost('nobody likes this', { media: [refB] });
+  await rejects('a post can’t mix a video with photos', alice.social.createPost('x', { media: [refA, video] }));
+  await waitFor('bob’s feed shows the post with its media and link', () => bobDiscovery.some((p) => p.ref === popular.ref && p.media?.[0]?.sha === refA.sha && p.link?.provider === 'youtube'));
+  await bob.social.like(popular.ref);
+  const repost = await bob.social.repost(popular.ref);
+  let reposts = { count: 0, repostedByMe: false };
+  const stopReposts = alice.social.subscribeReposts(popular.ref, (r) => { reposts = r; });
+  await waitFor('alice sees one verified repost', () => reposts.count === 1);
+  await waitFor('the repost shows in the feed', () => bobDiscovery.some((p) => p.ref === repost.ref && p.repostOf === popular.ref));
+  check('ignored post exists', Boolean(ignored.media?.length));
+
+  const info = await alice.media.info(refA.sha);
+  check('media info shows a 30-day expiry', info.status === 'live' && Math.abs((info.expiresAt ?? 0) - (Date.now() + 30 * 86_400_000)) < 120_000);
+  const later = Date.now() + 31 * 86_400_000;
+  const retention = await relay.media.runRetention(later);
+  check('after 30 days a liked + reposted file is kept forever', retention.kept.includes(refA.sha), retention);
+  check('an unpopular file expires', retention.removed.includes(refB.sha), retention);
+  check('expired files answer 410 Gone', (await fetchStatus(alice.media.url(refB.sha))) === 410);
+  check('kept files stay available', (await alice.media.info(refA.sha)).kept === true && (await fetchStatus(alice.media.url(refA.sha))) === 200);
+
+  const imgC = jpeg('c');
+  const refC = await alice.media.upload(imgC, { mime: 'image/jpeg' });
+  const temp = await alice.social.createPost('', { media: [refC] });
+  await alice.social.deletePost(temp.id);
+  await waitFor('deleting a post deletes its file', async () => (await fetchStatus(alice.media.url(refC.sha))) === 410);
+
+  const refD = await alice.media.upload(jpeg('d'), { mime: 'image/jpeg' });
+  const banned = await alice.social.createPost('caption stays', { media: [refD] });
+  await waitFor('bob sees the post with its file', () => bobDiscovery.some((p) => p.ref === banned.ref && p.media?.length === 1));
+  modClient.user().get('moderation').get('media').get(refD.sha).put(JSON.stringify({ reason: 'test', at: Date.now() }));
+  await waitFor('a banned file disappears from posts, the text stays', () => bobDiscovery.some((p) => p.ref === banned.ref && !p.media));
+  await waitFor('the relay takes the banned file down (451)', async () => (await fetch(`${relay.httpUrl}/lain/media/${refD.sha}`)).status === 451);
+
+  const secret = new Uint8Array(Buffer.from('a private photo for bob only'));
+  const priv = await alice.media.uploadPrivate(secret, 'image/jpeg');
+  const stored = Buffer.from(await (await fetch(alice.media.url(priv.sha))).arrayBuffer());
+  check('the relay stores DM attachments as ciphertext', !stored.includes(Buffer.from('private photo')));
+  check('the recipient decrypts the attachment', Buffer.from(await bob.media.downloadPrivate(priv)).equals(Buffer.from(secret)));
+
+  let seenAvatar = '';
+  const stopAvatar = bob.profiles.subscribe(alice.session!.pub, (p) => { seenAvatar = p?.avatar ?? ''; });
+  const avatar1 = await alice.media.setAvatar(jpeg('avatar1'), 'image/jpeg', (a) => alice.profiles.updateMine({ avatar: a }));
+  await waitFor('avatar is stored as a media reference', () => seenAvatar === avatar1);
+  check('avatar resolves to a URL', bob.media.resolveUri(avatar1).endsWith(avatar1.slice(6)));
+  const avatar2 = await alice.media.setAvatar(jpeg('avatar2'), 'image/jpeg', (a) => alice.profiles.updateMine({ avatar: a }), avatar1);
+  await waitFor('bob sees the new avatar', () => seenAvatar === avatar2);
+  stopAvatar();
+  await waitFor('replacing the avatar deletes the old file', async () => (await fetchStatus(bob.media.resolveUri(avatar1))) === 410);
+  const avatarRetention = await relay.media.runRetention(Date.now() + 90 * 86_400_000);
+  check('the current avatar never expires', !avatarRetention.removed.includes(avatar2.slice(6)) && (await fetchStatus(alice.media.resolveUri(avatar2))) === 200);
+  const bobFile = await bob.media.upload(jpeg('bob'), { mime: 'image/jpeg' });
+  stopReposts();
+
   console.log('\nAccount deletion');
   const bobPub = bob.session!.pub;
   await rejects('deletion needs the password', bob.deleteAccount('wrong-password-123'), InvalidCredentialsError);
@@ -203,6 +287,7 @@ async function main() {
   check('signed out after deletion', bob.session === null);
   check('relay purged the account', relay.policy.purged.has(bobPub));
   await waitFor('username is free again', () => squatter.isUsernameAvailable('bob'));
+  check('deleting the account deletes its files', (await fetchStatus(alice.media.url(bobFile.sha))) === 410);
 
   for (const stop of [stopDiscovery, stopFollowing, stopLikes, stopFollowers, stopReplies]) stop();
   console.log(`\n${passes} passed, ${failures} failed`);

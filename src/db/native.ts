@@ -16,3 +16,4 @@ export function initDb(config?: Partial<LainDbConfig>): Promise<LainDb> {
 }
 
 export { getDb };
+export * from './nativeMedia';

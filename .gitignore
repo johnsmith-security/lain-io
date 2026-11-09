@@ -14,5 +14,7 @@ ios/
 android/
 relay/keys/
 relay/data/
+relay/ipfs/
 relay/node_modules/
 relay/.env.relay
+tools/.bot-state.json

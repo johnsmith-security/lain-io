@@ -6,6 +6,7 @@ import type { Profile, Unsubscribe } from './types';
 import type { Usernames } from './usernames';
 
 const ACCENTS = ['#ff4fd8', '#59f3ff', '#ab7bff', '#ffd36b', '#79fbd2', '#7b82ff', '#da74ff'];
+const MAX_AVATAR_LENGTH = 200_000;
 
 function sanitize(pub: string, raw: unknown): Profile | null {
   const data = safeJson<Partial<Profile>>(raw);
@@ -15,7 +16,9 @@ function sanitize(pub: string, raw: unknown): Profile | null {
     username: data.username,
     name: String(data.name ?? data.username).slice(0, 50),
     bio: String(data.bio ?? '').slice(0, 280),
-    avatar: String(data.avatar ?? '').slice(0, 300),
+    // Small, cropped data URLs are embedded in the signed profile so followers
+    // can render the same avatar without relying on a device-local file URI.
+    avatar: String(data.avatar ?? '').slice(0, MAX_AVATAR_LENGTH),
     accent: /^#[0-9a-f]{6}$/i.test(String(data.accent)) ? String(data.accent) : ACCENTS[0],
     updatedAt: Number(data.updatedAt) || 0,
   };

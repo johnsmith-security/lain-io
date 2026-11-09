@@ -13,6 +13,7 @@ import { Auth, InvalidCredentialsError, checkPassword, validateEmail } from './a
 import { type LainDbConfig, configFromEnv } from './config';
 import { type Ctx, SEA, createGun, postJson } from './graph';
 import { LainData } from './lain';
+import { Media } from './media';
 import { Messenger } from './messages/messenger';
 import { Moderation } from './moderation';
 import type { Platform } from './platform';
@@ -29,6 +30,7 @@ export type { LainDbConfig } from './config';
 export type { Platform } from './platform';
 export { MAX_POST_LENGTH, makeRef, parseRef } from './social';
 export { newId } from './encoding';
+export { MEDIA_LIMITS, MediaError, findLink, isImage, isVideo } from './media';
 
 export class LainDb {
   readonly ctx: Ctx;
@@ -37,6 +39,7 @@ export class LainDb {
   readonly settings: SettingsStore;
   readonly safety: SafetyStore;
   readonly moderation: Moderation;
+  readonly media: Media;
   readonly social: Social;
   readonly messages: Messenger;
   readonly lain: LainData;
@@ -66,7 +69,8 @@ export class LainDb {
     this.settings = new SettingsStore(this.ctx);
     this.safety = new SafetyStore(this.ctx);
     this.moderation = new Moderation(this.ctx);
-    this.social = new Social(this.ctx, this.moderation, this.safety);
+    this.media = new Media(this.ctx, this.moderation);
+    this.social = new Social(this.ctx, this.moderation, this.safety, this.media);
     this.messages = new Messenger(this.ctx, this.safety, this.moderation);
     this.lain = new LainData(this.ctx);
     this.registry = new Registry(this.ctx);

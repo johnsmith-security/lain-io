@@ -147,10 +147,62 @@ Apple (App Review Guideline 1.2, user-generated content) and Google Play (UGC po
   - A DM report includes the reported messages as plaintext (the reporter's device has them decrypted) plus their envelope hashes. This is the only way moderation sees DM content, and the report screen says so.
   - The moderation team works from an internal console on the main relay, targeting **action within 24 hours**.
 - **Blocking:** instant and local. Blocked users' content is hidden, and their sessions are refused.
-- **Media:** uploads go through LainCorp blob storage, which scans them against known CSAM hashes (an industry hash-matching service) before accepting. The client only renders media from approved blob hosts, or media whose hash the main relay has approved.
+- **Media:** see A9. Uploads go through the main relay, which scans them against known CSAM hashes before storing them. Banned hashes are refused, taken down, and hidden by the client.
 - **AI output (Play AI policy):** "Report this reply" in the Lain chat feeds the same queue and the lain-000 eval set (B2).
 - **Age:** an age gate at onboarding, and a 17+ / Mature store rating (UGC + AI chat). Below that age the app is off-limits.
 - **Contact + policy:** support email, terms, and an objectionable-content policy, linked from Settings and from both store listings.
+
+### A9. Images and videos — built (2026-11-09)
+
+**Gun can't carry media.** Every relay copies every value, phones hold the graph in memory, and Gun has no streaming or byte ranges. A 5 MB photo in Gun would cost every viewer and every relay 5 MB+ of WebSocket traffic. So Gun stores only a **MediaRef** inside the signed post, and the bytes live in a blob store:
+
+```
+post (Gun, signed)  { body, media: [{ sha, mime, size, width, height, duration, thumb, cid, sensitive }], link }
+bytes (main relay)  /lain/media/<sha>  → Kubo (IPFS) pin, CID = cid
+```
+
+- `sha` is the SHA-256 of the file. The relay recomputes it, so a ref can't point at a different file. Files are deduplicated: the same meme uploaded twice is stored once and owned by both uploaders.
+- `thumb` is a ≈24 px JPEG data URL (≈1 KB). Viewers see it blurred while loading and after the file expires, so an ephemeral post never shows a broken image.
+- `cid` is the IPFS address. Any IPFS node that pinned the file can still serve it after we drop it (see "Retention" for what that means).
+
+**Upload path** (`POST /lain/media`, signed with the account key):
+1. Device: photos are re-encoded as JPEG, longest edge ≤ 2048 px. Re-encoding drops EXIF, so **GPS never leaves the phone**. GIFs stay as-is to keep their animation. Videos are ≤ 60 s and ≤ 25 MB, picked at 720p on iOS.
+2. Relay checks: signature and freshness, banned or purged account, banned hash, rate limit (60 per hour, 300 MB per day), size limit (6 MB photo, 25 MB video, 512 KB avatar), and real file type from magic bytes.
+3. Relay sends the file to the scanner, `SCANNER_URL` (below).
+4. The file is pinned in Kubo and recorded in the manifest (`data/media.json`: owners, upload times, kept, sensitive).
+
+**Scanning**
+
+| Check | Optional? | Effect |
+|---|---|---|
+| Known CSAM hash match (PhotoDNA, Thorn Safer, Cloudflare CSAM tool…) | **No.** Required on the main relay in production. Uploads are refused (503) when the scanner is missing, unless `ALLOW_UNSCANNED_MEDIA=1`. | Rejected (422); logged for reporting obligations |
+| Adult content (nudity classifier) | **Yes**, in two ways: the scanner may implement it, and each **viewer** decides in Settings → "Show sensitive media" (off by default; turning it on asks for 18+ confirmation) | File is stored but flagged `sensitive`, and blurred with "tap to view" unless the viewer opted in |
+| Uploader's own "18+" mark | Yes (composer chip) | Same as above |
+
+The scanner contract is `POST <bytes>` → `{ ok, reason?, adult? }`. Store note: Apple expects adult UGC to be hidden by default. Keep the toggle off by default and, if App Review asks, move the opt-in to the website (Reddit / X pattern).
+
+**Retention.** It runs hourly on the main relay; tests drive it with a fake clock.
+
+| Kind | Lifetime |
+|---|---|
+| Post media | **30 days** (`MEDIA_TTL_DAYS`). At expiry the relay scores it, and a file scoring ≥ `MEDIA_KEEP_SCORE` (default 50) is **kept forever**. Otherwise it's unpinned, Kubo GC runs, and it answers **410 Gone**. |
+| Avatars | While someone uses it as their avatar. Replacing it releases the old file. |
+| DM attachments | 30 days, never kept. Encrypted on the device with AES-256-GCM; the key travels only inside the Signal message, so the relay stores ciphertext. |
+| Deleted post / account | Released at once. Deleted when no other owner uses the file. |
+| Banned hash | Taken down as soon as the moderation list changes; serves **451**. |
+
+Score = verified likers + 2 × verified reposters of every post that used the file. Each like or repost is checked against the account's own signed space. Uploaders don't count, and neither do banned or purged accounts or accounts younger than `MEDIA_KEEP_MIN_ACCOUNT_AGE_DAYS` (7, from the registrar's claim date). This keeps throwaway accounts from rescuing their own uploads.
+
+**IPFS doesn't expire anything.** "Ephemeral" means *we* unpin it. A community relay or user that pinned the CID keeps it. So the promise to users is "Lain IO stops hosting it after 30 days", never "it's gone from the internet". Moderation removal works the same way: unpin, block the hash at the relay, and hide it in every client.
+
+**Long videos and external links:** post the link. If the text contains a URL, the composer asks the relay for a preview (`/lain/link-preview`). YouTube and PeerTube go through oEmbed: the relay makes the request, so the poster's IP isn't sent. The relay is SSRF-guarded: https only, no private addresses, no redirects. The preview is stored in the post, so viewers don't fetch it. Tapping opens the link.
+
+**Reposts:** "↗ Relay" on a post creates a post with `repostOf`. It writes `~pub/reposts/<ref>` and announces in `lain-io/reposts/<sha(ref)>#`. Counts are verified like likes, and they feed the keep score.
+
+**Known gaps:**
+- Android videos are uploaded as picked, so their MP4 container can still carry a location tag until we add a transcoder.
+- The `sensitive` flag rides in the uploader's post: a modified client can drop it. The relay serves `x-lain-sensitive` and `/info` for an authoritative check, and reports catch the rest.
+- Community relays don't run the media service. Their users upload to the main relay, which is configured by `serviceUrl`.
 
 ### A7. Code layout — built as `src/db/` (see DB-LAYER.md); relay in `relay/`
 
@@ -283,7 +335,7 @@ device                                    pipeline (stateless GPU workers)
 | **P1 Identity + storage** | `src/gun/` wrapper, RAD adapter, SEA polyfill, remove Google/Apple sign-in, onboarding with keys + recovery phrase + age gate, device certificates, encrypted settings, account deletion, App.tsx split | Settings persist and sync across an Android and an iOS device |
 | **P2 Social + moderation** | Profiles, signed posts, follows, likes, discovery index, block/mute, moderation list, report flow, moderation console, content filter | Real feed between test accounts; vandalism test passes; a report is actioned end to end. **Store-submittable from here on.** |
 | **P3 Messages** | X3DH + Double Ratchet 1:1, per-device fan-out, sealed envelopes + rotating mailboxes, safety numbers, then Sender Key groups, history transfer on device link | Two devices chat E2E through relays; relay sees only ciphertext and rotating mailbox ids; a stolen current key can't decrypt old messages (test) |
-| **P4 Relays + media** | 3 main relay nodes, community relay package with moderation sync, signed relay list + policy, blob storage with hash scanning, user-added relays | Load test: 10k users' worth of nodes; a community relay honors a ban and a purge in under 1 h |
+| **P4 Relays + media** | 3 main relay nodes, community relay package with moderation sync, signed relay list + policy, media service on Kubo/IPFS with CSAM scanning + optional adult flagging + 30-day/keep-popular retention (**built**, A9; needs a production scanner contract), user-added relays | Load test: 10k users' worth of nodes; a community relay honors a ban and a purge in under 1 h |
 | **P5 lain-000 release** | Persona model, registry, signed download, configurable system prompt, streaming, **iOS native module**, "Report this reply" | lain-000 is the default on both platforms; eval report published |
 | **P6 On-device memory** | Signals, profile builder, embeddings + retrieval, "What Lain knows" UI | Blind test: users prefer personalized replies |
 | **P7 Fine-tune pipeline (free)** | Dataset builder, consent flow, pipeline service, attestation + eligibility + fair queue, eval gate, adapter delivery, rollback | Opt-in beta with 50 users; zero eval-gate escapes; spend within budget |
@@ -301,6 +353,7 @@ P1–P4 (workstream A) and P5 (lain-000 + iOS module) can run in parallel with s
 | Q2 | Relays | **Community relays allowed**; the LainCorp main relay moderates, and the client enforces the signed moderation list for store compliance | A6, A8, P2, P4 |
 | Q3 | iOS on-device Lain at launch | **Yes** | B2, P0, P5 |
 | Q4 | Fine-tune pricing | **Free**, protected by attestation, eligibility rules, and a fair-queue budget | B4, P7 |
+| Q6 | Media storage | **Not in Gun.** Hash + thumbnail in Gun; bytes on IPFS (Kubo) pinned by the main relay. 30-day ephemeral; popular (likes + reposts) kept forever. Long video = YouTube/PeerTube links. Adult-content blur is a viewer setting (off by default); CSAM scanning is mandatory | A9, P4 |
 | Q5 | DM secrecy | **Signal protocol** (X3DH + Double Ratchet, sealed sender, Sender Keys for groups) over Gun | A5, P3 |
 
 ## E. Top risks
@@ -314,3 +367,4 @@ P1–P4 (workstream A) and P5 (lain-000 + iOS module) can run in parallel with s
 7. Free GPU abuse → attestation + eligibility + budget queue (B4).
 8. iOS memory limits for a 2.6 GB model → entitlement, device floor, early device testing in P0.
 9. Signal-protocol integration mistakes → reviewed library only, no custom crypto, external audit in P8.
+10. Media hosting liability: CSAM scanning must be live before public uploads (the relay refuses uploads in production without it). Storage cost of "kept forever" grows; watch the keep rate and raise `MEDIA_KEEP_SCORE` if needed.

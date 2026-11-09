@@ -4,7 +4,7 @@ import { File } from 'expo-file-system';
 import { GLView, ExpoWebGLRenderingContext } from 'expo-gl';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { ActivityIndicator, LayoutChangeEvent, PixelRatio, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, LayoutChangeEvent, PanResponder, PixelRatio, StyleSheet, Text, View } from 'react-native';
 
 // Keep the asset reference static so Metro includes it in the native bundle.
 const LAIN_MODEL_ASSET = require('../lain.glb');
@@ -100,6 +100,25 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [loadErrorMessage, setLoadErrorMessage] = useState('');
+  // Lain stays still on her own; a horizontal finger drag turns her, then she eases to a stop.
+  const spinRef = useRef({ yaw: 0, velocity: 0, dragging: false });
+  const dragStartYaw = useRef(0);
+  const panResponder = useRef(PanResponder.create({
+    // Claim horizontal drags only, so vertical swipes still scroll the page.
+    onMoveShouldSetPanResponderCapture: (_, g) => Math.abs(g.dx) > 6 && Math.abs(g.dx) > Math.abs(g.dy),
+    onPanResponderGrant: () => {
+      spinRef.current.dragging = true;
+      spinRef.current.velocity = 0;
+      dragStartYaw.current = spinRef.current.yaw;
+    },
+    onPanResponderMove: (_, g) => { spinRef.current.yaw = dragStartYaw.current + g.dx * 0.012; },
+    onPanResponderRelease: (_, g) => {
+      spinRef.current.dragging = false;
+      spinRef.current.velocity = g.vx * 0.2;
+    },
+    onPanResponderTerminate: () => { spinRef.current.dragging = false; },
+    onPanResponderTerminationRequest: () => false,
+  })).current;
 
   useEffect(() => () => {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
@@ -234,8 +253,6 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
       avatar.add(model);
 
       const clock = new THREE.Clock();
-      const mixer = gltf.animations?.length ? new THREE.AnimationMixer(model) : null;
-      mixer?.clipAction(gltf.animations[0]).play();
       const head = model.getObjectByName('頭');
       const neck = model.getObjectByName('首');
       const leftArm = model.getObjectByName('腕.L');
@@ -256,21 +273,26 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
           const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
           gridMaterials.forEach((material, index) => material.color?.setHex(gridColors[index % 2]));
         }
-        const delta = clock.getDelta();
-        const t = clock.elapsedTime;
+        const t = clock.getElapsedTime();
         const currentState = animationStateRef.current;
         const listening = currentState === 'listening' || currentState === 'processing';
         const thinking = currentState === 'thinking';
         const speaking = currentState === 'speaking';
         if (head && baseRotations[0]) {
-          head.rotation.x = baseRotations[0].x + Math.sin(t * (speaking ? 5 : 1.5)) * (speaking ? 0.08 : 0.025);
-          head.rotation.z = baseRotations[0].z + (listening ? -0.12 : thinking ? 0.09 : 0) + Math.sin(t * 0.8) * 0.018;
+          // Only a speaking nod and a listening/thinking head tilt; no idle sway.
+          head.rotation.x = baseRotations[0].x + (speaking ? Math.sin(t * 5) * 0.08 : 0);
+          head.rotation.z = baseRotations[0].z + (listening ? -0.12 : thinking ? 0.09 : 0);
         }
-        if (neck && baseRotations[1]) neck.rotation.z = baseRotations[1].z + (listening ? -0.08 : thinking ? 0.06 : 0) + Math.sin(t * 1.2) * 0.012;
+        if (neck && baseRotations[1]) neck.rotation.z = baseRotations[1].z + (listening ? -0.08 : thinking ? 0.06 : 0);
         if (leftArm && baseRotations[2]) leftArm.rotation.x = baseRotations[2].x + (speaking ? Math.sin(t * 4) * 0.06 : 0);
         if (rightArm && baseRotations[3]) rightArm.rotation.x = baseRotations[3].x + (speaking ? Math.sin(t * 4 + 1.2) * 0.06 : 0);
-        avatar.rotation.y += 0.0025;
-        mixer?.update(delta);
+        const spin = spinRef.current;
+        if (!spin.dragging && spin.velocity !== 0) {
+          spin.yaw += spin.velocity;
+          spin.velocity *= 0.92;
+          if (Math.abs(spin.velocity) < 0.0005) spin.velocity = 0;
+        }
+        avatar.rotation.y = spin.yaw;
         syncViewport();
         renderer.render(scene, camera);
         gl.endFrameEXP();
@@ -298,7 +320,7 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
     if (width > 0 && height > 0) pixelSizeRef.current = { width: Math.round(width * ratio), height: Math.round(height * ratio) };
   };
 
-  return <View onLayout={onLayout} style={[styles.stage, fill ? styles.fillStage : { height: stageHeight }]}>
+  return <View onLayout={onLayout} {...panResponder.panHandlers} style={[styles.stage, fill ? styles.fillStage : { height: stageHeight }]}>
     <GLView style={styles.gl} onContextCreate={onContextCreate} />
     {isLoading && <View pointerEvents="none" style={styles.loading}><ActivityIndicator color="#59f3ff" /><Text style={styles.loadingText}>LOADING MODEL</Text></View>}
     {loadError && <View pointerEvents="none" style={styles.error}><Text style={styles.errorText}>Couldn’t load lain.glb</Text><Text style={styles.errorDetail}>{loadErrorMessage}</Text></View>}

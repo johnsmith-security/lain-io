@@ -1,12 +1,16 @@
 // Posts, feeds, likes, follows, replies.
 //
-//   ~pub/posts/<id>                 JSON {id, body, createdAt, editedAt?, replyTo?} | null   signed
+//   ~pub/posts/<id>                 JSON {id, body, createdAt, editedAt?, replyTo?, media?, link?, repostOf?} | null   signed
 //   ~pub/likes/<ref|key>            JSON {at} | null                                         signed
+//   ~pub/reposts/<ref|key>          JSON {id, at} | null  (id = the repost post)             signed
 //   ~pub/follows/<pub>              JSON {at} | null                                         signed
 //   lain-io/index/<day>#            JSON {ref, at}           discovery pointers (content-addressed)
 //   lain-io/likes/<sha(ref)>#       JSON {pub, ref}          "I liked this" announcements
 //   lain-io/followers/<sha(pub)>#   JSON {pub, target}       "I follow X" announcements
 //   lain-io/replies/<sha(ref)>#     JSON {ref, parent}       reply pointers
+//   lain-io/reposts/<sha(ref)>#     JSON {pub, ref}          "I reposted this" announcements
+//
+// Media (MediaRef) is only a hash + tiny thumbnail; the bytes are on the media relay (media.ts).
 //
 // Announcements only help others *find* signed data. Every like, follow, and
 // reply is checked against the author's own signed space before it counts.
@@ -15,9 +19,10 @@ import { dayBucket, newId, recentDays, safeJson } from './encoding';
 import {
   type Ctx, collectMap, meNode, putAck, putHashed, readOnce, requirePair, sha256url, subscribeLeaf, subscribeMap, throttle, userNode,
 } from './graph';
+import { type Media, sanitizeLinkPreview, sanitizeMediaList } from './media';
 import { modKey, type Moderation } from './moderation';
 import type { SafetyStore } from './settings';
-import type { Post, PostRef, Unsubscribe } from './types';
+import type { LinkPreview, MediaRef, Post, PostRef, Unsubscribe } from './types';
 
 export const MAX_POST_LENGTH = 2000;
 const MAX_FOLLOW_SUBSCRIPTIONS = 200;
@@ -31,11 +36,18 @@ export function parseRef(ref: PostRef): { pub: string; id: string } | null {
   return { pub: ref.slice(0, at), id: ref.slice(at + 1) };
 }
 
-type StoredPost = { id: string; body: string; createdAt: number; editedAt?: number; replyTo?: PostRef };
+type StoredPost = {
+  id: string; body: string; createdAt: number; editedAt?: number; replyTo?: PostRef;
+  media?: MediaRef[]; link?: LinkPreview; repostOf?: PostRef;
+};
 
 function toPost(pub: string, id: string, raw: unknown): Post | null {
   const data = safeJson<StoredPost>(raw);
-  if (!data || data.id !== id || typeof data.body !== 'string' || !data.body.trim()) return null;
+  if (!data || data.id !== id || typeof data.body !== 'string') return null;
+  const media = sanitizeMediaList(data.media);
+  const link = sanitizeLinkPreview(data.link);
+  const repostOf = typeof data.repostOf === 'string' && parseRef(data.repostOf) ? data.repostOf : undefined;
+  if (!data.body.trim() && !media && !link && !repostOf) return null;
   return {
     ref: makeRef(pub, id),
     id,
@@ -44,6 +56,9 @@ function toPost(pub: string, id: string, raw: unknown): Post | null {
     createdAt: Number(data.createdAt) || 0,
     editedAt: data.editedAt ? Number(data.editedAt) : undefined,
     replyTo: typeof data.replyTo === 'string' ? data.replyTo : undefined,
+    ...(media ? { media } : {}),
+    ...(link ? { link } : {}),
+    ...(repostOf ? { repostOf } : {}),
   };
 }
 
@@ -55,7 +70,7 @@ class PostList {
 
   constructor(private social: Social, cb: (posts: Post[]) => void, limit = Infinity) {
     this.emit = throttle(() => {
-      const visible = [...this.posts.values()].filter((p) => this.social.isVisible(p)).sort((a, b) => b.createdAt - a.createdAt);
+      const visible = [...this.posts.values()].map((p) => this.social.present(p)).filter((p): p is Post => Boolean(p)).sort((a, b) => b.createdAt - a.createdAt);
       cb(visible.slice(0, limit));
     });
     this.stops.push(social.onVisibilityChange(this.emit));
@@ -79,7 +94,7 @@ class PostList {
 export class Social {
   private visibilityListeners = new Set<() => void>();
 
-  constructor(private ctx: Ctx, private moderation: Moderation, private safety: SafetyStore) {
+  constructor(private ctx: Ctx, private moderation: Moderation, private safety: SafetyStore, private media: Media) {
     moderation.onChange(() => this.notifyVisibility());
     safety.subscribe(() => this.notifyVisibility());
   }
@@ -97,19 +112,42 @@ export class Social {
     return true;
   }
 
+  /** The post as the viewer should see it (banned files removed), or null when hidden. */
+  present(post: Post): Post | null {
+    if (!this.isVisible(post)) return null;
+    if (!post.media?.some((m) => this.moderation.isMediaBanned(m.sha))) return post;
+    const media = post.media.filter((m) => !this.moderation.isMediaBanned(m.sha));
+    const rest: Post = { ...post, media: media.length ? media : undefined };
+    return rest.body.trim() || rest.media || rest.link || rest.repostOf ? rest : null;
+  }
+
   onVisibilityChange(cb: () => void): Unsubscribe { this.visibilityListeners.add(cb); return () => { this.visibilityListeners.delete(cb); }; }
   private notifyVisibility() { for (const cb of this.visibilityListeners) cb(); }
 
   // ---------- posts ----------
 
-  async createPost(body: string, options: { replyTo?: PostRef } = {}): Promise<Post> {
+  /**
+   * Publish a post. `media`: refs from db.media.upload (≤ 4 images or 1 video).
+   * `link`: from db.media.linkPreview(url). `repostOf`: use repost() instead.
+   */
+  async createPost(body: string, options: { replyTo?: PostRef; media?: MediaRef[]; link?: LinkPreview; repostOf?: PostRef } = {}): Promise<Post> {
     const { session } = requirePair(this.ctx);
     const text = body.trim();
-    if (!text) throw new Error('Write something first.');
+    const media = options.media?.length ? sanitizeMediaList(options.media) : undefined;
+    if (options.media?.length && media?.length !== options.media.length) throw new Error('Attach up to 4 photos, or 1 video.');
+    const link = options.link ? sanitizeLinkPreview(options.link) : undefined;
+    if (!text && !media && !link && !options.repostOf) throw new Error('Write something first.');
     if (text.length > MAX_POST_LENGTH) throw new Error(`Posts can be up to ${MAX_POST_LENGTH} characters.`);
     if (options.replyTo && !parseRef(options.replyTo)) throw new Error('Invalid reply target.');
+    if (options.repostOf && !parseRef(options.repostOf)) throw new Error('Invalid post.');
     const id = newId();
-    const stored: StoredPost = { id, body: text, createdAt: Date.now(), ...(options.replyTo ? { replyTo: options.replyTo } : {}) };
+    const stored: StoredPost = {
+      id, body: text, createdAt: Date.now(),
+      ...(options.replyTo ? { replyTo: options.replyTo } : {}),
+      ...(media ? { media } : {}),
+      ...(link ? { link } : {}),
+      ...(options.repostOf ? { repostOf: options.repostOf } : {}),
+    };
     await putAck(meNode(this.ctx).get('posts').get(id), JSON.stringify(stored));
     const ref = makeRef(session.pub, id);
     await putHashed(this.ctx, `lain-io/index/${dayBucket(stored.createdAt)}#`, JSON.stringify({ ref, at: stored.createdAt }));
@@ -131,10 +169,14 @@ export class Social {
     return toPost(session.pub, id, JSON.stringify(stored))!;
   }
 
-  /** Deletes your copy. Relays and peers that already synced it keep a tombstone (null). */
+  /** Deletes your copy. Relays and peers that already synced it keep a tombstone (null). Its files are released. */
   async deletePost(id: string): Promise<void> {
     requirePair(this.ctx);
-    await putAck(meNode(this.ctx).get('posts').get(id), null);
+    const node = meNode(this.ctx).get('posts').get(id);
+    const existing = safeJson<StoredPost>(await readOnce(node, this.ctx.config.readTimeoutMs));
+    await putAck(node, null);
+    if (existing?.repostOf) await putAck(meNode(this.ctx).get('reposts').get(modKey(existing.repostOf)), null);
+    for (const m of sanitizeMediaList(existing?.media) ?? []) await this.media.release(m.sha);
   }
 
   async getPost(ref: PostRef): Promise<Post | null> {
@@ -148,7 +190,7 @@ export class Social {
     if (!parsed) { cb(null); return () => {}; }
     return subscribeLeaf(userNode(this.ctx, parsed.pub).get('posts').get(parsed.id), (raw) => {
       const post = toPost(parsed.pub, parsed.id, raw);
-      cb(post && this.isVisible(post) ? post : null);
+      cb(post ? this.present(post) : null);
     });
   }
 
@@ -236,25 +278,63 @@ export class Social {
 
   /** Live like count (verified against each liker's signed space) and whether you liked it. */
   subscribeLikes(ref: PostRef, cb: (state: { count: number; likedByMe: boolean; capped: boolean }) => void): Unsubscribe {
+    return this.subscribeTally('likes', ref, ({ count, mine, capped }) => cb({ count, likedByMe: mine, capped }));
+  }
+
+  // ---------- reposts ----------
+
+  /** Repost to your followers and The Wired. Popular reposts also keep the post's media from expiring. */
+  async repost(ref: PostRef): Promise<Post> {
+    const { session } = requirePair(this.ctx);
+    const parsed = parseRef(ref);
+    if (!parsed) throw new Error('Invalid post.');
+    if (parsed.pub === session.pub) throw new Error('You can’t repost your own post.');
+    const mark = meNode(this.ctx).get('reposts').get(modKey(ref));
+    const existing = safeJson<{ id: string }>(await readOnce(mark, this.ctx.config.readTimeoutMs));
+    if (existing?.id) {
+      const post = await this.getPost(makeRef(session.pub, existing.id));
+      if (post) return post;
+    }
+    const post = await this.createPost('', { repostOf: ref });
+    await putAck(mark, JSON.stringify({ id: post.id, at: post.createdAt }));
+    await putHashed(this.ctx, `lain-io/reposts/${await sha256url(ref)}#`, JSON.stringify({ pub: session.pub, ref }));
+    return post;
+  }
+
+  async unrepost(ref: PostRef): Promise<void> {
+    requirePair(this.ctx);
+    const mark = meNode(this.ctx).get('reposts').get(modKey(ref));
+    const existing = safeJson<{ id: string }>(await readOnce(mark, this.ctx.config.readTimeoutMs));
+    if (existing?.id) await putAck(meNode(this.ctx).get('posts').get(existing.id), null);
+    await putAck(mark, null);
+  }
+
+  /** Live repost count (verified) and whether you reposted it. */
+  subscribeReposts(ref: PostRef, cb: (state: { count: number; repostedByMe: boolean }) => void): Unsubscribe {
+    return this.subscribeTally('reposts', ref, ({ count, mine }) => cb({ count, repostedByMe: mine }));
+  }
+
+  /** Count of accounts that announced `kind` for `ref`, each checked against their own signed space. */
+  private subscribeTally(kind: 'likes' | 'reposts', ref: PostRef, cb: (state: { count: number; mine: boolean; capped: boolean }) => void): Unsubscribe {
     const me = this.ctx.session?.pub;
-    const likers = new Map<string, boolean>();
+    const voters = new Map<string, boolean>();
     const stops: Unsubscribe[] = [];
     const emit = throttle(() => {
       let count = 0;
-      for (const [pub, liked] of likers) if (liked && !this.moderation.isPubBanned(pub) && !this.safety.isBlocked(pub)) count++;
-      cb({ count, likedByMe: Boolean(me && likers.get(me)), capped: likers.size >= MAX_VERIFIED_LIKES });
+      for (const [pub, yes] of voters) if (yes && !this.moderation.isPubBanned(pub) && !this.safety.isBlocked(pub)) count++;
+      cb({ count, mine: Boolean(me && voters.get(me)), capped: voters.size >= MAX_VERIFIED_LIKES });
     });
     const watch = (pub: string) => {
-      if (likers.has(pub) || likers.size >= MAX_VERIFIED_LIKES) return;
-      likers.set(pub, false);
-      stops.push(subscribeLeaf(userNode(this.ctx, pub).get('likes').get(modKey(ref)), (value) => {
-        likers.set(pub, Boolean(safeJson(value)));
+      if (voters.has(pub) || voters.size >= MAX_VERIFIED_LIKES) return;
+      voters.set(pub, false);
+      stops.push(subscribeLeaf(userNode(this.ctx, pub).get(kind).get(modKey(ref)), (value) => {
+        voters.set(pub, Boolean(safeJson(value)));
         emit();
       }));
     };
     if (me) watch(me);
     void sha256url(ref).then((hash) => {
-      stops.push(subscribeMap(this.ctx.gun.get(`lain-io/likes/${hash}#`), (_key, value) => {
+      stops.push(subscribeMap(this.ctx.gun.get(`lain-io/${kind}/${hash}#`), (_key, value) => {
         const entry = safeJson<{ pub: string; ref: PostRef }>(value);
         if (entry?.ref === ref && entry.pub) watch(entry.pub);
       }));
@@ -314,7 +394,7 @@ export class Social {
 
   async wipeMine(): Promise<void> {
     requirePair(this.ctx);
-    for (const branch of ['posts', 'likes', 'follows']) {
+    for (const branch of ['posts', 'likes', 'reposts', 'follows']) {
       const items = await collectMap(meNode(this.ctx).get(branch), { idleMs: 800, maxMs: 6000 });
       for (const key of items.keys()) await putAck(meNode(this.ctx).get(branch).get(key), null, 3000);
     }

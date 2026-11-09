@@ -2,7 +2,7 @@ FROM node:22-alpine
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
-COPY server.js ./
+COPY server.js media.js ./
 COPY tools ./tools
 ENV PORT=8765 HOST=0.0.0.0 DATA_DIR=/data
 EXPOSE 8765

@@ -19,12 +19,19 @@
       ],
       "expo-secure-store",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Lain IO to access your photos and videos to share them in posts and set your profile picture."
+        }
+      ],
+      [
         "expo-sqlite",
         {
           "useSQLCipher": true
         }
       ],
-      "react-native-quick-crypto"
+      "react-native-quick-crypto",
+      "expo-video"
     ],
     "ios": {
       "supportsTablet": true,

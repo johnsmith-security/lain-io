@@ -1,6 +1,6 @@
 # Lain IO database layer — GUI linking guide
 
-Everything storage-related lives in [`src/db/`](../src/db/) and runs on GunDB. The GUI only talks to this layer, never to Gun directly. The layer is tested end to end against a real relay (`npm run test:db`, 56 checks) and bundles for Android. **It has not run on a phone yet**; see "First run on a device" below.
+Everything storage-related lives in [`src/db/`](../src/db/) and runs on GunDB. The GUI only talks to this layer, never to Gun directly. The layer is tested end to end against a real relay (`npm run test:db`, 88 checks) and bundles for Android. **It has not run on a phone yet**; see "First run on a device" below.
 
 ## 1. Setup checklist (once)
 
@@ -66,6 +66,8 @@ Show a spinner on sign-up / sign-in / recovery: key stretching (PBKDF2, 600k rou
 - ♡: `const { count, likedByMe, toggle } = useLikes(post.ref)`.
 - ◌ replies: `useReplies(post.ref)`; reply with `createPost(text, { replyTo: post.ref })`.
 - "···" menu: own post → `editPost(post.id, text)` / `deletePost(post.id)`. Others → `db.moderation.report({ kind: 'post', target: post.ref, reason })`, `db.safety.block(post.author)`.
+- Media and links: see "Media" below. `PostCard` in App.tsx already renders `post.media`, `post.link` and reposts.
+- ↗ Relay (repost): `const { count, repostedByMe, toggle } = useReposts(post.ref)`; a repost has `post.repostOf`, so show the original with `usePost(post.repostOf)`.
 - The "2.4k online" counter has no data source (presence isn't built). Remove it or hide it.
 
 **Friends / Connections**
@@ -91,8 +93,18 @@ Show a spinner on sign-up / sign-in / recovery: key stretching (PBKDF2, 600k rou
 - Report a Lain reply: `db.moderation.report({ kind: 'lain-reply', target: msgId, reason })`.
 - Models: `db.registry.listModels()` (signed list), `db.lain.setActiveModel({ version })`.
 
+**Media (photos, videos, links)**: all wired in App.tsx; details in the plan, §A9.
+- Pick + prepare (device only, from `src/db/native`): `const items = await pickPostMedia({ already })`. It returns up to 4 photos or 1 video, resized, with EXIF stripped and a tiny thumbnail. Upload: `const media = await uploadPrepared(db, items)`.
+- Links: `const url = findLink(text); const link = url ? await db.media.linkPreview(url) : undefined`.
+- Post: `db.social.createPost(text, { media, link })`. Text may be empty when there's media.
+- Show: `db.media.url(m.sha)` (empty string = removed by moderation). Draw `m.thumb` blurred underneath. If the image fails to load (410), the file expired: keep the blurred thumb and say so.
+- Sensitive: if `m.sensitive && !settings.showSensitiveMedia`, show only the blurred thumb with "tap to view". Uploaders mark their own files by setting `sensitive: true` on items before `uploadPrepared` (the 18+ chip in the composer).
+- Avatars: `pickAvatar(db)` uploads a 512 px square and stores `media:<sha>` in the profile. Render any avatar with `db.media.resolveUri(profile.avatar)`; old data-URL avatars still work.
+- DMs: `db.media.uploadPrivate(bytes, mime)` returns a `PrivateMediaRef` (it includes the key). Put it in the message; the receiver opens it with `openPrivateMedia(db, ref)` → local URI.
+- Limits: `MEDIA_LIMITS`. Errors are `MediaError` with readable messages.
+
 **Settings**
-- `const [settings, update] = useSettings()`. `lainStyle`, `selectedModel`, `privatePresence`, `quietMode`, `showActivity`, `readReceipts`, and `typingIndicators` replace the `useState`s. Write with `update({ quietMode: true })`. Settings sync encrypted to the user's other devices.
+- `const [settings, update] = useSettings()`. `lainStyle`, `selectedModel`, `privatePresence`, `quietMode`, `showActivity`, `readReceipts`, `typingIndicators`, and `showSensitiveMedia` replace the `useState`s. Before enabling `showSensitiveMedia`, confirm the user is 18+. Write with `update({ quietMode: true })`. Settings sync encrypted to the user's other devices.
 - Profile card / EDIT: `useProfile(session.pub)`, `db.profiles.updateMine({ name, bio, accent, avatar })`.
 - "Blocked connections": `Object.keys(useSafety()?.blocked ?? {}).length`; `db.safety.unblock(pub)`; muted words: `db.safety.setMutedWords([...])`.
 - "Sync & storage": configured relays + `settings.relays` (user-added; `update({ relays: [...] })` connects at once). Signed list: `db.registry.listRelays()`.
@@ -112,7 +124,8 @@ Show a spinner on sign-up / sign-in / recovery: key stretching (PBKDF2, 600k rou
 |---|---|---|
 | Profile | `~pub/profile` | signed |
 | Password vault / recovery vault | `~pub/auth/vault`, `~pub/auth/recovery` | encrypted (PBKDF2 key / 160-bit code) |
-| Posts, likes, follows | `~pub/posts/*`, `~pub/likes/*`, `~pub/follows/*` | signed |
+| Posts, likes, reposts, follows | `~pub/posts/*`, `~pub/likes/*`, `~pub/reposts/*`, `~pub/follows/*` | signed |
+| Photos, videos, avatars | **not in Gun**: `MediaRef` (hash + thumb) in the post; bytes at `{serviceUrl}/lain/media/<sha>` (IPFS pin) | content hash; 30-day TTL unless popular; DM files encrypted |
 | Discovery, like/follower/reply pointers | `lain-io/index/<day>#`, `lain-io/likes/<h>#`, `lain-io/followers/<h>#`, `lain-io/replies/<h>#` | content-addressed; checked against signed data |
 | Settings, blocks, recovery email | `~pub/private/*` | encrypted to the account key |
 | Device keys | `~pub/devices/*`, `~pub/prekeys/*` | signed |

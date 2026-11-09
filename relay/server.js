@@ -5,6 +5,7 @@
 //   POST /lain/registrar/release     owner releases a username
 //   POST /lain/recovery/send         email a recovery code (not stored) (needs SMTP_URL in production)
 //   POST /lain/account/purge         stop storing/serving a deleted account
+//   /lain/media, /lain/link-preview  images and videos (see media.js; main relay)
 //   GET  /lain/health
 //
 // Enforcement (every relay running this file, community relays included):
@@ -23,12 +24,14 @@ const http = require('http');
 const path = require('path');
 const Gun = require('gun');
 const SEA = require('gun/sea');
+const { createMedia } = require('./media');
 
 const RESERVED = new Set(['admin', 'administrator', 'root', 'system', 'support', 'help', 'security', 'staff', 'official',
   'mod', 'moderator', 'moderation', 'laincorp', 'lain', 'lain_io', 'lainio', 'registrar', 'relay', 'null', 'undefined']);
 const validName = (name) => typeof name === 'string' && /^[a-z0-9_]{3,20}$/.test(name) && !RESERVED.has(name);
 const validEmail = (email) => typeof email === 'string' && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const parseSigned = (signed) => { try { return JSON.parse(String(signed).replace(/^SEA/, '')).m; } catch { return undefined; } };
+const sha256url = async (text) => String(await SEA.work(text, null, null, { name: 'SHA-256' })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const pubOfSoul = (soul) => (typeof soul === 'string' && soul[0] === '~' && soul[1] !== '@' ? soul.slice(1).split('/')[0] : null);
 
 function readJson(file, fallback) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } }
@@ -205,6 +208,17 @@ async function start(options = {}) {
     mailRetentionDays: Number(options.mailRetentionDays ?? env.MAIL_RETENTION_DAYS ?? 30),
     maxValueBytes: Number(options.maxValueBytes ?? env.MAX_VALUE_BYTES ?? 65_536),
     persist: options.persist ?? true,
+    ipfsApi: options.ipfsApi ?? env.IPFS_API ?? '',
+    scannerUrl: options.scannerUrl ?? env.SCANNER_URL ?? '',
+    allowUnscanned: options.allowUnscanned ?? env.ALLOW_UNSCANNED_MEDIA === '1',
+    mediaTtlDays: Number(options.mediaTtlDays ?? env.MEDIA_TTL_DAYS ?? 30),
+    keepScore: Number(options.keepScore ?? env.MEDIA_KEEP_SCORE ?? 50),
+    keepMinAccountAgeDays: Number(options.keepMinAccountAgeDays ?? env.MEDIA_KEEP_MIN_ACCOUNT_AGE_DAYS ?? 7),
+    retentionIntervalMs: Number(options.retentionIntervalMs ?? (env.MEDIA_RETENTION_INTERVAL_MIN ?? 60) * 60_000),
+    maxVideoBytes: Number(options.maxVideoBytes ?? env.MEDIA_MAX_VIDEO_BYTES ?? 25 * 1024 * 1024),
+    dailyBytes: Number(options.dailyBytes ?? env.MEDIA_DAILY_BYTES ?? 300 * 1024 * 1024),
+    scan: options.scan,           // tests: (buf, mime, sha) => ({ ok, reason })
+    fetchJson: options.fetchJson, // tests: stub for oEmbed requests
     onMail: options.onMail, // tests: capture outgoing mail
     log: options.log ?? console.log,
   };
@@ -213,6 +227,7 @@ async function start(options = {}) {
   const policy = {
     bannedPubs: new Set(),
     bannedPosts: new Set(),
+    bannedMedia: new Set(),
     purged: new Set(readJson(purgedFile, [])),
     mailRetentionDays: o.mailRetentionDays,
     maxValueBytes: o.maxValueBytes,
@@ -228,8 +243,9 @@ async function start(options = {}) {
   };
 
   let gun;
+  let media = null;
   const routes = {
-    'GET /lain/health': async () => [200, { ok: true, registrar: Boolean(o.registrarPair), moderation: Boolean(o.moderationPub) }],
+    'GET /lain/health': async () => [200, { ok: true, registrar: Boolean(o.registrarPair), moderation: Boolean(o.moderationPub), media: media ? { store: media.store, healthy: await media.health() } : null }],
 
     'POST /lain/registrar/claim': async (body) => {
       if (!o.registrarPair) return [404, { error: 'no registrar on this relay' }];
@@ -280,6 +296,7 @@ async function start(options = {}) {
       if (!request || request.action !== 'purge' || request.pub !== body.pub) return [400, { error: 'bad request' }];
       policy.purged.add(body.pub);
       fs.writeFileSync(purgedFile, JSON.stringify([...policy.purged]));
+      if (media) await media.releaseOwner(body.pub);
       return [200, { ok: true }];
     },
   };
@@ -287,9 +304,16 @@ async function start(options = {}) {
   const server = http.createServer(async (req, res) => {
     const route = `${req.method} ${(req.url || '').split('?')[0]}`;
     if (req.method === 'OPTIONS' && (req.url || '').startsWith('/lain/')) {
-      res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST', 'access-control-allow-headers': 'content-type' });
+      res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,HEAD,POST', 'access-control-allow-headers': 'content-type,range,x-lain-pub,x-lain-request' });
       res.end();
       return;
+    }
+    if (media && /^\/lain\/(media|link-preview)/.test(req.url || '')) {
+      try { if (await media.handle(req, res)) return; } catch (error) {
+        o.log('[relay] media request failed', error && error.message);
+        if (!res.headersSent) json(res, 500, { error: 'media request failed' }); else res.destroy();
+        return;
+      }
     }
     const handler = routes[route];
     if (!handler) {
@@ -331,16 +355,32 @@ async function start(options = {}) {
     const follow = (kind, set) => mod.get(kind).map().on((value, key) => { if (value) set.add(key); else set.delete(key); });
     follow('pubs', policy.bannedPubs);
     follow('posts', policy.bannedPosts);
+    mod.get('media').map().on((value, key) => {
+      if (value) { policy.bannedMedia.add(key); if (media) media.onBanned(key); } else policy.bannedMedia.delete(key);
+    });
   }
 
-  o.log(`[relay] listening on ${port} · registrar ${o.registrarPair ? 'on' : 'off'} · moderation ${o.moderationPub ? 'on' : 'off'} · mail ${mailer ? 'on' : o.production ? 'OFF' : 'dev-log'}`);
+  media = createMedia({
+    ...o,
+    ttlDays: o.mediaTtlDays,
+    gun,
+    policy,
+    registrar: Boolean(o.registrarPair),
+    verifyFresh,
+    limit,
+    sha256url,
+  });
+
+  o.log(`[relay] listening on ${port} · registrar ${o.registrarPair ? 'on' : 'off'} · moderation ${o.moderationPub ? 'on' : 'off'} · mail ${mailer ? 'on' : o.production ? 'OFF' : 'dev-log'} · media ${media.store}${o.scannerUrl || o.scan ? ' (scanned)' : o.production && !o.allowUnscanned ? ' (uploads OFF: no scanner)' : ' (unscanned, dev)'}`);
   return {
     url: `http://127.0.0.1:${port}/gun`,
     httpUrl: `http://127.0.0.1:${port}`,
     gun,
     policy,
     server,
+    media,
     close: () => new Promise((resolve) => {
+      media.close();
       try { Object.values(gun.back('opt.peers') || {}).forEach((peer) => { try { peer.wire && peer.wire.close(); } catch { /* noop */ } }); } catch { /* noop */ }
       server.closeAllConnections && server.closeAllConnections();
       server.close(() => resolve());
