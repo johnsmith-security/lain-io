@@ -7,7 +7,9 @@ import { type Ctx, accountNs, decryptWith, encryptFor, meNode, putAck, requirePa
 import type { Safety, Settings, Unsubscribe } from './types';
 
 export const DEFAULT_SETTINGS: Settings = {
+  appTheme: 'wired',
   lainStyle: 'vaporwave',
+  lainVoice: 'wired',
   selectedModel: 'lain-000',
   privatePresence: true,
   quietMode: false,

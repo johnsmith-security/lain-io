@@ -17,6 +17,7 @@ REGISTRAR_PAIR='…' MODERATION_PUB=… SMTP_URL=smtps://user:pass@smtp.example.
 | `MODERATION_PUB` | Moderation account; its bans are enforced on reads and writes |
 | `SMTP_URL`, `MAIL_FROM` | Recovery email. Without them: dev mode prints codes; production returns 503 |
 | `MAIL_RETENTION_DAYS` (30), `MAX_VALUE_BYTES` (65536) | Limits |
+| `MAIL_WRITES_PER_MIN` (600) | Mail envelopes (messages + receipts) one connection may write per minute; the excess is dropped without an ack and the client's outbox retries. `/lain/health` reports `mail.dropped`. |
 | `IPFS_API` | Kubo RPC URL (e.g. `http://ipfs:5001`). Media is pinned there. Unset: files go to `DATA_DIR/media` (dev) |
 | `SCANNER_URL` | Media scanner: `POST <bytes>` → `{ ok, reason?, adult? }`. **Required in production** (CSAM hash matching); `adult` flags files as sensitive |
 | `ALLOW_UNSCANNED_MEDIA=1` | Accept uploads without a scanner in production. Don't. |

@@ -118,6 +118,20 @@ export async function uploadPrepared(db: LainDb, items: PreparedMedia[]): Promis
   return refs;
 }
 
+/**
+ * Encrypt prepared items on the device (AES-256-GCM, fresh key per file) and upload the
+ * ciphertext. Pass the refs to db.messages.send(conversationId, text, { media }); the keys
+ * travel only inside the Signal message. The relay keeps the ciphertext 30 days.
+ */
+export async function uploadPrivatePrepared(db: LainDb, items: PreparedMedia[]): Promise<PrivateMediaRef[]> {
+  const refs: PrivateMediaRef[] = [];
+  for (const item of items) {
+    const bytes = await new File(item.uri).bytes();
+    refs.push(await db.media.uploadPrivate(bytes, item.mime, { width: item.width, height: item.height, duration: item.duration, thumb: item.thumb }));
+  }
+  return refs;
+}
+
 /** Pick, crop square, shrink to 512 px, upload, and set as the profile picture. Returns false when cancelled. */
 export async function pickAvatar(db: LainDb): Promise<boolean> {
   await ensureLibraryAccess();

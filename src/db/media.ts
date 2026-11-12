@@ -72,6 +72,34 @@ export function sanitizeMediaList(raw: unknown): MediaRef[] | undefined {
   return out.length ? out : undefined;
 }
 
+/** Thumbs ride inside the encrypted message; keep them small so an envelope stays under the relay's value limit. */
+const PRIVATE_THUMB_CHARS = 3000;
+const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/** Validate DM attachments from a decrypted message: up to 4 images, or 1 video. */
+export function sanitizePrivateMediaList(raw: unknown): PrivateMediaRef[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const list: PrivateMediaRef[] = [];
+  for (const item of raw.slice(0, MEDIA_LIMITS.imagesPerPost)) {
+    const r = item as Partial<PrivateMediaRef> | null;
+    if (!r || typeof r !== 'object' || typeof r.sha !== 'string' || !SHA_RE.test(r.sha)) continue;
+    if (typeof r.key !== 'string' || r.key.length !== 44 || !B64_RE.test(r.key)) continue;
+    if (typeof r.iv !== 'string' || r.iv.length !== 16 || !B64_RE.test(r.iv)) continue;
+    if (typeof r.plainMime !== 'string' || (!isImage({ mime: r.plainMime }) && !isVideo({ mime: r.plainMime }))) continue;
+    const size = num(r.size, MEDIA_LIMITS.privateBytes + 64);
+    if (size === undefined) continue;
+    list.push({
+      sha: r.sha, key: r.key, iv: r.iv, plainMime: r.plainMime, mime: 'application/octet-stream', size,
+      width: num(r.width, 20_000), height: num(r.height, 20_000), duration: num(r.duration, 3600),
+      thumb: typeof r.thumb === 'string' && r.thumb.startsWith('data:image/') && r.thumb.length <= PRIVATE_THUMB_CHARS ? r.thumb : undefined,
+      cid: typeof r.cid === 'string' && /^[a-z0-9]{20,100}$/i.test(r.cid) ? r.cid : undefined,
+    });
+  }
+  const video = list.find((m) => isVideo({ mime: m.plainMime }));
+  const out = video ? [video] : list;
+  return out.length ? out : undefined;
+}
+
 export function sanitizeLinkPreview(raw: unknown): LinkPreview | undefined {
   const r = raw as Partial<LinkPreview> | null;
   if (!r || typeof r !== 'object' || typeof r.url !== 'string' || !/^https?:\/\//.test(r.url) || r.url.length > 2000) return undefined;
@@ -146,7 +174,8 @@ export class Media {
     const key = await crypto.subtle.importKey('raw', keyBytes as BufferSource, { name: 'AES-GCM' }, false, ['encrypt']);
     const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as BufferSource }, key, bytes as BufferSource));
     const result = await this.put(cipher, 'application/octet-stream', 'private');
-    return { ...meta, sha: result.sha, size: cipher.length, mime: 'application/octet-stream', cid: result.cid, key: bytesToB64(keyBytes), iv: bytesToB64(iv), plainMime };
+    const thumb = meta.thumb && meta.thumb.length <= PRIVATE_THUMB_CHARS ? meta.thumb : undefined;
+    return { ...meta, thumb, sha: result.sha, size: cipher.length, mime: 'application/octet-stream', cid: result.cid, key: bytesToB64(keyBytes), iv: bytesToB64(iv), plainMime };
   }
 
   /** Download and decrypt a DM attachment. */

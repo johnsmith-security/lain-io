@@ -56,6 +56,159 @@ export function createGun(platform: Platform, peers: string[]): any {
   return Gun(opt);
 }
 
+// ---------- connection health ----------
+//
+// Gun's websocket client has two failure modes that silently stop all sync:
+//  - if the first reconnect attempt fails, its 'bye' handler drops the peer and
+//    it never tries again (relay restart, phone switching networks);
+//  - it has no heartbeat, so a half-open socket (mobile NAT timeout, a proxy or
+//    `kubectl port-forward` whose backend went away) looks connected forever.
+// keepPeersAlive pings idle peers, replaces dead or hung sockets, and on every
+// reconnect re-asks the relay for everything we're subscribed to, so writes
+// made while we were offline still arrive. (A relay forgets a client's
+// subscriptions when its socket closes, and only pushes live writes.)
+
+const WS_OPEN = 1;
+const randomMsgId = () => Math.random().toString(36).slice(2, 11);
+
+/** The soul behind a chain like gun.get('a').get('b') → "a/b" (Gun names implicit child nodes by path). */
+export function soulOf(node: any): string | null {
+  const parts: string[] = [];
+  let at = node?._;
+  while (at) {
+    if (at.soul) { parts.unshift(at.soul); return parts.join('/'); }
+    if (at.get === undefined || at.root === at) return null;
+    parts.unshift(String(at.get));
+    at = at.back;
+  }
+  return null;
+}
+
+/** Active subscriptions per Gun root, so they can be re-asked after a reconnect. */
+const liveSouls = new WeakMap<object, Map<string, { get: Record<string, string>; refs: number }>>();
+
+function trackLive(node: any, leaf: boolean): () => void {
+  const root = node?._?.root;
+  if (!root) return () => {};
+  let get: Record<string, string> | null = null;
+  if (leaf) {
+    const parent = soulOf(node.back?.());
+    const key = node._?.get;
+    if (parent && typeof key === 'string') get = { '#': parent, '.': key };
+  } else {
+    const soul = soulOf(node);
+    if (soul) get = { '#': soul };
+  }
+  if (!get) return () => {};
+  const id = get['.'] !== undefined ? `${get['#']}\u0000${get['.']}` : get['#'];
+  let map = liveSouls.get(root);
+  if (!map) liveSouls.set(root, (map = new Map()));
+  const entry = map.get(id) ?? { get, refs: 0 };
+  entry.refs++;
+  map.set(id, entry);
+  return () => { entry.refs--; if (entry.refs <= 0) map!.delete(id); };
+}
+
+/** Ask the relays again for every soul with a live subscription. Replies flow into the existing listeners. */
+export function reaskLive(gun: any): number {
+  const root = gun?._?.root;
+  const map = root && liveSouls.get(root);
+  if (!map) return 0;
+  for (const { get } of map.values()) root.on('out', { get, '#': randomMsgId() });
+  return map.size;
+}
+
+export type KeepAliveOptions = { intervalMs?: number; idleMs?: number; pingTimeoutMs?: number; connectTimeoutMs?: number };
+
+/**
+ * Keep every relay in `urls()` connected. Calls `onReconnect` when a relay that was
+ * connected before comes back. Returns { stop, wake }; call wake() when the app
+ * returns to the foreground or the network changes, to check right away.
+ */
+export function keepPeersAlive(gun: any, urls: () => string[], onReconnect: (url: string) => void, options: KeepAliveOptions = {}) {
+  const { intervalMs = 5000, idleMs = 20_000, pingTimeoutMs = 8000, connectTimeoutMs = 12_000 } = options;
+  const root = gun._.root;
+  const opt = gun._.opt;
+  const everConnected = new Set<string>();
+
+  const instrument = (peer: any) => {
+    const wire = peer?.wire;
+    if (!wire || wire.__lainWrapped) return;
+    const original = wire.onmessage;
+    wire.onmessage = function (this: unknown, msg: unknown) {
+      peer.lainIn = Date.now();
+      peer.lainPing = 0;
+      return original?.call(this, msg);
+    };
+    wire.__lainWrapped = true;
+  };
+
+  root.on('hi', function (this: any, peer: any) {
+    this.to.next(peer);
+    const url = peer?.url;
+    if (!url) return;
+    peer.lainIn = Date.now();
+    peer.lainPing = 0;
+    peer.lainOpening = 0;
+    instrument(peer);
+    if (everConnected.has(url)) onReconnect(url);
+    everConnected.add(url);
+  });
+
+  const reopen = (url: string) => {
+    const mesh = opt.mesh;
+    if (!mesh?.wire) return;
+    const peer = { url, id: url, lainOpening: Date.now() };
+    opt.peers[url] = peer;
+    try { mesh.wire(peer); } catch { /* retried next tick */ }
+  };
+  const kill = (peer: any) => {
+    const wire = peer.wire;
+    peer.wire = null;
+    if (wire) {
+      wire.onclose = wire.onerror = wire.onmessage = wire.onopen = null;
+      try { wire.close(); } catch { /* already closed */ }
+    }
+    try { opt.mesh?.bye(peer); } catch { /* noop */ }
+    delete opt.peers[peer.url ?? peer.id];
+  };
+
+  const check = (forcePing = false) => {
+    const now = Date.now();
+    for (const url of urls()) {
+      if (!/^(wss?|https?):\/\//.test(url)) continue;
+      const peer = opt.peers[url];
+      if (!peer) { reopen(url); continue; }
+      const wire = peer.wire;
+      const state = wire?.readyState;
+      if (!wire || state === 2 || state === 3) {
+        // Gun's own reconnect timer may still be pending; give it one connect window.
+        if (!peer.lainOpening) peer.lainOpening = now;
+        else if (now - peer.lainOpening > connectTimeoutMs) { kill(peer); reopen(url); }
+        continue;
+      }
+      if (state !== WS_OPEN) {                                    // CONNECTING
+        if (!peer.lainOpening) peer.lainOpening = now;
+        else if (now - peer.lainOpening > connectTimeoutMs) { kill(peer); reopen(url); }
+        continue;
+      }
+      instrument(peer);
+      if (peer.lainPing && now - peer.lainPing > pingTimeoutMs) { kill(peer); reopen(url); continue; }
+      if (!peer.lainPing && (forcePing || now - (peer.lainIn ?? 0) > idleMs)) {
+        peer.lainPing = now;
+        try { opt.mesh.say({ dam: '?', pid: opt.pid }, peer); } catch { /* noop */ }
+      }
+    }
+  };
+
+  const timer = setInterval(() => check(false), intervalMs);
+  (timer as { unref?: () => void }).unref?.();
+  return {
+    stop: () => clearInterval(timer),
+    wake: () => check(true),
+  };
+}
+
 export type Ctx = {
   gun: any;
   platform: Platform;
@@ -161,12 +314,14 @@ export async function putHashed(ctx: Ctx, soul: string, value: string): Promise<
 export function subscribeMap(node: any, onItem: (key: string, value: unknown) => void): Unsubscribe {
   let active = true;
   const events = new Set<any>();
+  const untrack = trackLive(node, false);
   node.map().on((value: unknown, key: string, _msg: unknown, ev: any) => {
     if (ev) events.add(ev);
     if (!active) { try { ev?.off(); } catch { /* noop */ } return; }
     onItem(key, value);
   });
   return () => {
+    if (active) untrack();
     active = false;
     for (const ev of events) { try { ev.off(); } catch { /* noop */ } }
     events.clear();
@@ -177,12 +332,13 @@ export function subscribeMap(node: any, onItem: (key: string, value: unknown) =>
 export function subscribeLeaf(node: any, onValue: (value: unknown) => void): Unsubscribe {
   let active = true;
   let ev: any;
+  const untrack = trackLive(node, true);
   node.on((value: unknown, _key: string, _msg: unknown, e: any) => {
     ev = e;
     if (!active) { try { e?.off(); } catch { /* noop */ } return; }
     onValue(value);
   });
-  return () => { active = false; try { ev?.off(); } catch { /* noop */ } };
+  return () => { if (active) untrack(); active = false; try { ev?.off(); } catch { /* noop */ } };
 }
 
 /** Collect a map's children until no new item arrives for `idleMs` (or `maxMs` passes). */

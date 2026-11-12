@@ -1,6 +1,6 @@
 # Lain IO database layer — GUI linking guide
 
-Everything storage-related lives in [`src/db/`](../src/db/) and runs on GunDB. The GUI only talks to this layer, never to Gun directly. The layer is tested end to end against a real relay (`npm run test:db`, 88 checks) and bundles for Android. **It has not run on a phone yet**; see "First run on a device" below.
+Everything storage-related lives in [`src/db/`](../src/db/) and runs on GunDB. The GUI only talks to this layer, never to Gun directly. The layer is tested end to end against a real relay (`npm run test:db`, 110 checks) and runs on Android against the minikube relay (`Infrastructure/`). Where the screens live: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 1. Setup checklist (once)
 
@@ -55,7 +55,7 @@ Outside React use `getDb()` from `src/db/native` (after `initDb()` resolved).
 
 Show a spinner on sign-up / sign-in / recovery: key stretching (PBKDF2, 600k rounds) takes a moment on the phone.
 
-## 4. Screen-by-screen wiring (current [App.tsx](../App.tsx))
+## 4. Screen-by-screen wiring (screens live in [`src/features/`](../src/features/))
 
 **Onboarding** (replaces the username-only form): tabs "Create account" / "Sign in", fields username + password (+ optional email on create), "Forgot password?" → username + code + new password.
 
@@ -66,7 +66,7 @@ Show a spinner on sign-up / sign-in / recovery: key stretching (PBKDF2, 600k rou
 - ♡: `const { count, likedByMe, toggle } = useLikes(post.ref)`.
 - ◌ replies: `useReplies(post.ref)`; reply with `createPost(text, { replyTo: post.ref })`.
 - "···" menu: own post → `editPost(post.id, text)` / `deletePost(post.id)`. Others → `db.moderation.report({ kind: 'post', target: post.ref, reason })`, `db.safety.block(post.author)`.
-- Media and links: see "Media" below. `PostCard` in App.tsx already renders `post.media`, `post.link` and reposts.
+- Media and links: see "Media" below. `features/feed/PostCard.tsx` already renders `post.media`, `post.link` and reposts.
 - ↗ Relay (repost): `const { count, repostedByMe, toggle } = useReposts(post.ref)`; a repost has `post.repostOf`, so show the original with `usePost(post.repostOf)`.
 - The "2.4k online" counter has no data source (presence isn't built). Remove it or hide it.
 
@@ -76,9 +76,14 @@ Show a spinner on sign-up / sign-in / recovery: key stretching (PBKDF2, 600k rou
 - Followers: `useFollowers(session.pub)`.
 - ↗ button: `const conv = await db.messages.openDirect(pub)`, then open the Messages screen with `conv.id`.
 
-**Messages (new screen)**
-- Inbox: `useConversations()` → `{ id, kind, members, name, lastMessagePreview, lastMessageAt, unread }`.
-- Thread: `useMessages(conversationId)` → `ChatMessage[]` (oldest first). Send with `db.messages.send(id, text)`, call `db.messages.markRead(id)` on open, and offer `db.messages.resend(id, msgId)` when `status === 'failed'`.
+**Messages** (wired: `features/friends` lists chats, `features/messages` is the chat)
+- Inbox: `useConversations()` → `{ id, kind, members, name, lastMessagePreview, lastMessageAt, unread }`; tab badge: sum of `unread` (`useUnreadTotal()`).
+- Thread: `useMessages(conversationId)` → `ChatMessage[]` (oldest first). `db.messages.markRead(id)` on open (syncs to your other devices; sends a read receipt if `settings.readReceipts`).
+- Send: `db.messages.send(id, text, { media })`. Attachments: `uploadPrivatePrepared(db, await pickPostMedia())` encrypts on the device (AES-256-GCM) and uploads ciphertext; the key travels only inside the Signal message. Show with `openPrivateMedia(db, ref)` → local URI.
+- Status: `sending` → `sent` (relay acked) → `delivered` (their device decrypted it) → `read` (only if they enabled read receipts). `failed` = the relay never acked; it sits in the outbox and is retried on reconnect, on `db.wake()` and every minute for 24 h. `db.messages.resend(id, msgId)` retries now.
+- Delete: `deleteLocalMessage(id, msgId)` (this device), `deleteForEveryone(id, msgId)` (your own messages: recipients get a tombstone, attachments are released), `deleteLocalConversation(id)`.
+- Report from a chat: `db.moderation.report({ kind: 'message', target: pub, reason, evidence })` with the messages the user picks.
+- `MessageTooLargeError` if a message (text + attachment refs) wouldn't fit the relay's 64 KB value limit.
 - Groups: `createGroup(name, pubs)`, `updateGroup(id, { name, add, remove })` (owner only), `leaveGroup(id)`.
 - Security: `useIdentityWarnings()` (banner: "@x's device keys changed"), `safetyNumbers(pub)` (verify screen), `trustNewIdentity(pub, deviceId)`.
 - Devices (Settings): `myDevices()`, `revokeDevice(id)`.
@@ -93,7 +98,7 @@ Show a spinner on sign-up / sign-in / recovery: key stretching (PBKDF2, 600k rou
 - Report a Lain reply: `db.moderation.report({ kind: 'lain-reply', target: msgId, reason })`.
 - Models: `db.registry.listModels()` (signed list), `db.lain.setActiveModel({ version })`.
 
-**Media (photos, videos, links)**: all wired in App.tsx; details in the plan, §A9.
+**Media (photos, videos, links)**: all wired (`features/feed`, `features/messages`); details in the plan, §A9.
 - Pick + prepare (device only, from `src/db/native`): `const items = await pickPostMedia({ already })`. It returns up to 4 photos or 1 video, resized, with EXIF stripped and a tiny thumbnail. Upload: `const media = await uploadPrepared(db, items)`.
 - Links: `const url = findLink(text); const link = url ? await db.media.linkPreview(url) : undefined`.
 - Post: `db.social.createPost(text, { media, link })`. Text may be empty when there's media.
@@ -111,6 +116,8 @@ Show a spinner on sign-up / sign-in / recovery: key stretching (PBKDF2, 600k rou
 - Account: change password, recovery email, devices, sign out, **delete account**.
 
 ## 5. Rules of thumb
+
+- Call `db.wake()` when the app comes back to the foreground (App.tsx does). Relay sockets often die while the phone sleeps; the layer also pings idle relays every 20 s, replaces dead or half-open sockets, and re-asks for every live subscription after a reconnect, so writes made while you were offline still arrive. Mailboxes of days you missed entirely are read once at start.
 
 - Every `subscribe…` / hook is live and cleans up after itself. Lists arrive as whole arrays, newest first (threads oldest first).
 - The layer filters moderation bans, blocks, and muted words before the GUI sees data. Don't filter again.

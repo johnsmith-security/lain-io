@@ -174,6 +174,85 @@ async function main() {
   await alice.messages.send(group.id, 'group hello');
   await waitFor('group message arrives', () => bob.messages.listMessages(group.id).some((m) => m.text === 'group hello'));
 
+  console.log('\nReceipts, attachments, delete, outbox');
+  const statusOf = (db: LainDb, id: string) => db.messages.listMessages(conv.id, { limit: 1000 }).find((m) => m.id === id)?.status;
+  const r1 = await alice.messages.send(conv.id, 'did it arrive?');
+  await waitFor('sender sees “delivered” once a recipient device decrypts it', () => statusOf(alice, r1.id) === 'delivered');
+  bob.messages.markRead(conv.id);
+  await new Promise((r) => setTimeout(r, 2500));
+  check('read receipts are off by default (status stays delivered)', statusOf(alice, r1.id) === 'delivered', statusOf(alice, r1.id));
+  await bob.settings.update({ readReceipts: true });
+  const r2 = await alice.messages.send(conv.id, 'and now?');
+  await waitFor('bob gets the next message', () => bob.messages.listMessages(conv.id).some((m) => m.id === r2.id));
+  bob.messages.markRead(conv.id);
+  await waitFor('with read receipts on, the sender sees “read”', () => statusOf(alice, r2.id) === 'read');
+  await bob.messages.send(conv.id, 'unread on both of alice’s devices');
+  await waitFor('alice’s devices both count it unread', () => (alice.messages.getConversation(conv.id)?.unread ?? 0) > 0 && (alice2.messages.getConversation(conv.id)?.unread ?? 0) > 0);
+  alice.messages.markRead(conv.id);
+  await waitFor('reading on one device clears unread on the other', () => alice2.messages.getConversation(conv.id)?.unread === 0);
+
+  const photo = new Uint8Array(4096).map((_, i) => (i * 31) & 0xff);
+  const attachment = await alice.messages.send(conv.id, 'a photo', { media: [await alice.media.uploadPrivate(photo, 'image/jpeg', { width: 64, height: 64 })] });
+  const gotPhoto = await waitFor('bob receives the attachment ref', () => bob.messages.listMessages(conv.id).find((m) => m.id === attachment.id && m.media?.length === 1));
+  if (gotPhoto?.media) {
+    const decrypted = await bob.media.downloadPrivate(gotPhoto.media[0]);
+    check('bob decrypts the attachment byte-for-byte', decrypted.length === photo.length && decrypted.every((b, i) => b === photo[i]));
+    const stored = new Uint8Array(await (await fetch(`${relay.httpUrl}/lain/media/${gotPhoto.media[0].sha}`)).arrayBuffer());
+    check('the relay stores only ciphertext', stored.length === photo.length + 16 && !stored.slice(0, 64).every((b, i) => b === photo[i]));
+    check('the conversation preview names the photo', bob.messages.getConversation(conv.id)?.lastMessagePreview === 'a photo');
+  }
+  await rejects('a message with invalid attachments is refused', alice.messages.send(conv.id, 'x', { media: [{ sha: 'nope' } as any] }));
+
+  await alice.messages.deleteForEveryone(conv.id, attachment.id);
+  await waitFor('delete for everyone tombstones bob’s copy', () => bob.messages.listMessages(conv.id).find((m) => m.id === attachment.id)?.deleted === true);
+  check('the tombstone keeps no text or media', (() => { const m = bob.messages.listMessages(conv.id).find((x) => x.id === attachment.id); return m?.text === '' && !m.media; })());
+  await rejects('you can’t delete someone else’s message for everyone', bob.messages.deleteForEveryone(conv.id, r1.id));
+  check('delete for me removes only the local copy', bob.messages.deleteLocalMessage(conv.id, r2.id) && !bob.messages.listMessages(conv.id).some((m) => m.id === r2.id) && alice.messages.listMessages(conv.id).some((m) => m.id === r2.id));
+
+  const realPutMail = (alice.messages as any).putMail;
+  (alice.messages as any).putMail = async () => false;            // relay unreachable
+  const queued = await alice.messages.send(conv.id, 'sent while offline');
+  check('an unacked message is marked failed and queued', queued.status === 'failed' && alice.messages.outbox().some((e) => e.id === queued.id));
+  (alice.messages as any).putMail = realPutMail;                   // back online
+  await alice.messages.flushOutbox();
+  await waitFor('the outbox delivers it after reconnecting', () => bob.messages.listMessages(conv.id).filter((m) => m.id === queued.id).length === 1);
+  await waitFor('the queued message ends up delivered and leaves the outbox', () => statusOf(alice, queued.id) === 'delivered' && !alice.messages.outbox().length);
+
+  console.log('\nRelay connection health');
+  {
+    // A proxy that can silently stop forwarding (half-open socket, like a dead port-forward or mobile NAT).
+    const net = await import('node:net');
+    const relayPort = Number(new URL(relay.url).port);
+    const pipes = new Set<{ dead: boolean }>();
+    const proxy = net.createServer((c) => {
+      const u = net.connect(relayPort, '127.0.0.1');
+      const pipe = { dead: false };
+      pipes.add(pipe);
+      c.on('data', (d) => { if (!pipe.dead) u.write(d); }); u.on('data', (d) => { if (!pipe.dead) c.write(d); });
+      c.on('error', () => {}); u.on('error', () => {}); c.on('close', () => u.destroy()); u.on('close', () => { if (!pipe.dead) c.destroy(); });
+    });
+    await new Promise<void>((r) => proxy.listen(0, '127.0.0.1', () => r()));
+    const viaProxy = `http://127.0.0.1:${(proxy.address() as import('node:net').AddressInfo).port}/gun`;
+    const { createGun, keepPeersAlive, reaskLive, subscribeMap } = await import('../src/db/graph');
+    const watcher = createGun(platform(), [viaProxy]);
+    const seen = new Set<string>();
+    subscribeMap(watcher.get('health-test'), (key) => seen.add(key));
+    let reconnects = 0;
+    const alive = keepPeersAlive(watcher, () => [viaProxy], () => { reconnects++; reaskLive(watcher); }, { intervalMs: 300, idleMs: 1500, pingTimeoutMs: 1200, connectTimeoutMs: 3000 });
+    const writer = createGun(platform(), [relay.url]);
+    await new Promise((r) => setTimeout(r, 800));
+    writer.get('health-test').get('a').put('1');
+    await waitFor('a live write arrives', () => seen.has('a'));
+    for (const p of pipes) p.dead = true;                              // link goes half-open
+    writer.get('health-test').get('b').put('2');                       // written while the watcher can't hear
+    await waitFor('the dead link is detected and replaced', () => reconnects > 0, 15000);
+    await waitFor('the write missed while offline is fetched after reconnecting', () => seen.has('b'));
+    writer.get('health-test').get('c').put('3');
+    await waitFor('live writes flow again on the new connection', () => seen.has('c'));
+    alive.stop();
+    proxy.close();
+  }
+
   console.log('\nLain data');
   await alice.lain.setConsent({ learnLocal: true });
   const fact = await alice.lain.addMemory({ text: 'Likes 90s synth music', source: 'explicit' });

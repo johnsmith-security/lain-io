@@ -146,6 +146,12 @@ export function useMessages(conversationId: string | null): ChatMessage[] {
   return useLive<ChatMessage[]>([], db && session && conversationId ? (set) => db.messages.subscribeMessages(conversationId, set) : null, [db, session?.pub, conversationId]);
 }
 
+/** Unread messages across all conversations (tab badge). */
+export function useUnreadTotal(): number {
+  const conversations = useConversations();
+  return conversations.reduce((sum, c) => sum + (c.unread || 0), 0);
+}
+
 export function useIdentityWarnings(): IdentityWarning[] {
   const db = dbOrNull();
   const session = useSession();

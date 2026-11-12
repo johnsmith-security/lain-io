@@ -4,6 +4,10 @@
 // He: signs up (or back in) as @bob, posts a hello with a generated picture,
 // follows and likes every new post in "The Wired", relays (reposts) posts that
 // have photos or videos, and replies to direct messages and group messages.
+// DMs: read receipts on; photos and videos you send him are downloaded and
+// decrypted (proving the end-to-end path), and he answers a photo with an
+// encrypted picture of his own. "delete" in a DM makes him delete his last
+// message for everyone.
 // State (keys, Signal sessions) persists in tools/.bot-state.json.
 
 import fs from 'node:fs';
@@ -140,21 +144,40 @@ async function main() {
   db.messages.subscribeConversations((conversations) => {
     for (const conv of conversations) {
       for (const msg of db.messages.listMessages(conv.id, { limit: 20 })) {
-        if (msg.from === me || replied.has(msg.id) || msg.receivedAt < startedAt - 60_000) continue;
+        if (msg.from === me || msg.deleted || replied.has(msg.id) || msg.receivedAt < startedAt - 60_000) continue;
         replied.add(msg.id);
         db.ctx.platform.kv.set(`${me}:bot`, msg.id, '1');
         void (async () => {
           const who = (await db.profiles.get(msg.from))?.username ?? '?';
-          log(`${conv.kind} from @${who}: "${msg.text}"`);
+          log(`${conv.kind} from @${who}: "${msg.text}"${msg.media ? ` + ${msg.media.length} attachment(s)` : ''}`);
           await new Promise((r) => setTimeout(r, 800));
-          const reply = await db.messages.send(conv.id, `bob here — got "${msg.text.slice(0, 80)}" (end-to-end encrypted, relay saw only ciphertext)`);
           db.messages.markRead(conv.id);
+          if (/^delete$/i.test(msg.text.trim())) {
+            const mine = db.messages.listMessages(conv.id, { limit: 50 }).filter((m) => m.from === me && !m.deleted).pop();
+            if (mine) { await db.messages.deleteForEveryone(conv.id, mine.id); log('deleted my last message for everyone'); }
+            return;
+          }
+          if (msg.media?.length) {
+            const sizes: string[] = [];
+            for (const m of msg.media) {
+              try { const bytes = await db.media.downloadPrivate(m); sizes.push(`${m.plainMime} ${(bytes.length / 1024).toFixed(0)} KB`); }
+              catch (e) { sizes.push(`${m.plainMime} (couldn’t decrypt: ${(e as Error).message})`); }
+            }
+            const png = gradientPng((Date.now() / 1000) | 0);
+            const ref = await db.media.uploadPrivate(png, 'image/png', { width: 320, height: 200 });
+            const reply = await db.messages.send(conv.id, `bob here — decrypted ${sizes.join(', ')} on my side. The relay and IPFS only ever held ciphertext. Here’s one back:`, { media: [ref] });
+            log(`replied with an encrypted picture (${reply.status})`);
+            return;
+          }
+          const reply = await db.messages.send(conv.id, `bob here — got "${msg.text.slice(0, 80)}" (end-to-end encrypted, relay saw only ciphertext)`);
           log(`replied (${reply.status})`);
         })().catch((e) => log('reply failed', e.message));
       }
     }
   });
 
+  if (!db.settings.get().readReceipts) await db.settings.update({ readReceipts: true }).catch(() => undefined);
+  // Show delivery / read receipts as they come back for bob's own messages.
   log('listening… (Ctrl+C to stop)');
 }
 

@@ -11,7 +11,7 @@
 import { setWebCrypto } from '@privacyresearch/libsignal-protocol-typescript';
 import { Auth, InvalidCredentialsError, checkPassword, validateEmail } from './auth';
 import { type LainDbConfig, configFromEnv } from './config';
-import { type Ctx, SEA, createGun, postJson } from './graph';
+import { type Ctx, SEA, createGun, keepPeersAlive, postJson, reaskLive } from './graph';
 import { LainData } from './lain';
 import { Media } from './media';
 import { Messenger } from './messages/messenger';
@@ -31,6 +31,7 @@ export type { Platform } from './platform';
 export { MAX_POST_LENGTH, makeRef, parseRef } from './social';
 export { newId } from './encoding';
 export { MEDIA_LIMITS, MediaError, findLink, isImage, isVideo } from './media';
+export { MessageTooLargeError, previewOf } from './messages/messenger';
 
 export class LainDb {
   readonly ctx: Ctx;
@@ -47,6 +48,7 @@ export class LainDb {
   private auth: Auth;
   private sessionListeners = new Set<(session: Session | null) => void>();
   private extraPeers = new Set<string>();
+  private keepAlive: { stop: () => void; wake: () => void };
 
   private constructor(platform: Platform, config: LainDbConfig) {
     const listeners = new Map<string, Set<(payload: any) => void>>();
@@ -71,10 +73,29 @@ export class LainDb {
     this.moderation = new Moderation(this.ctx);
     this.media = new Media(this.ctx, this.moderation);
     this.social = new Social(this.ctx, this.moderation, this.safety, this.media);
-    this.messages = new Messenger(this.ctx, this.safety, this.moderation);
+    this.messages = new Messenger(this.ctx, this.safety, this.moderation, this.settings, this.media);
     this.lain = new LainData(this.ctx);
     this.registry = new Registry(this.ctx);
     this.settings.subscribe((s) => this.addPeers(s.relays));
+    this.keepAlive = keepPeersAlive(this.ctx.gun, () => [...config.peers, ...this.extraPeers], (url) => {
+      const souls = reaskLive(this.ctx.gun);
+      console.log(`[lain-db] reconnected to ${url}; re-asked ${souls} subscriptions`);
+      this.ctx.emit('reconnect', url);
+    });
+  }
+
+  /**
+   * Check relay connections now (call when the app returns to the foreground or the
+   * network changes). Dead or half-open sockets are replaced, and anything written
+   * while we were away is fetched.
+   */
+  wake() { this.keepAlive.wake(); this.ctx.emit('wake'); }
+
+  /** Stop background timers (tests, tools). */
+  close() {
+    this.keepAlive.stop();
+    this.stopSession();
+    try { Object.values(this.ctx.gun._.opt.peers ?? {}).forEach((peer: any) => { try { peer.wire?.close(); } catch { /* noop */ } }); } catch { /* noop */ }
   }
 
   /** Create the database and restore the saved session, if any. */

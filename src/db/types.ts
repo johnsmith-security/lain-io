@@ -1,5 +1,6 @@
 // Public types for the Lain IO database layer. GUI code should import from
 // `src/db` (index.ts), never from Gun directly.
+import type { ThemeId } from '../theme/themes';
 
 export type SEAPair = { pub: string; priv: string; epub: string; epriv: string };
 
@@ -81,7 +82,10 @@ export type Post = {
 };
 
 export type Settings = {
+  appTheme: ThemeId;
   lainStyle: 'vaporwave' | 'wired';
+  /** How Lain's voice sounds: through the Wired (filtered, a little static) or clean. */
+  lainVoice: 'wired' | 'clean';
   selectedModel: string;
   privatePresence: boolean;
   quietMode: boolean;
@@ -123,9 +127,22 @@ export type ChatMessage = {
   sentAt: number;
   receivedAt: number;
   replyTo?: string;
-  /** 'sending' until at least one recipient device got an envelope written; 'sent' after. */
-  status: 'sending' | 'sent' | 'received' | 'failed';
+  /** Encrypted attachments (photos or one video). The key travels only inside the Signal message. */
+  media?: PrivateMediaRef[];
+  /**
+   * Your messages: 'sending' → 'sent' (relay acked the envelope) → 'delivered' (a recipient
+   * device decrypted it) → 'read' (only if the recipient has read receipts on).
+   * 'failed' messages stay in the outbox and are retried on reconnect for 24 h.
+   * Received messages: 'received'.
+   */
+  status: MessageStatus;
+  /** Received messages: when you read it (also synced from your other devices). */
+  readAt?: number;
+  /** Deleted for everyone by its sender: text and media are gone, a tombstone remains. */
+  deleted?: boolean;
 };
+
+export type MessageStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'received' | 'failed';
 
 export type IdentityWarning = { pub: string; deviceId: number; at: number };
 

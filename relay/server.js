@@ -12,6 +12,7 @@
 //   - drops writes and reads for banned or purged accounts and banned posts
 //   - strips banned posts from outgoing data
 //   - drops mail envelopes older than MAIL_RETENTION_DAYS
+//   - rate-limits mail writes per connection (MAIL_WRITES_PER_MIN) so one client can't flood mailboxes
 //   - rejects oversized values
 //
 // Run a single registrar (one node). Other main-relay nodes can run without
@@ -58,6 +59,22 @@ Gun.on('opt', function (root) {
     return Boolean(pub && soul === `~${pub}/posts` && policy.bannedPosts.has(`${pub}|${key}`));
   };
   const tooBig = (val) => typeof val === 'string' && val.length > policy.maxValueBytes;
+  const MAIL_RE = /^lain-io\/mail\//;
+  // Per-connection token bucket for mail writes. Gun sets msg._.via to the sending peer.
+  const buckets = new WeakMap();
+  const mailAllowed = (msg, count) => {
+    const peer = msg && msg._ && msg._.via;
+    if (!peer || typeof peer !== 'object' || !policy.mailWritesPerMin) return true;
+    const now = Date.now();
+    const rate = policy.mailWritesPerMin / 60_000;
+    let b = buckets.get(peer);
+    if (!b) { b = { tokens: policy.mailWritesPerMin, at: now }; buckets.set(peer, b); }
+    b.tokens = Math.min(policy.mailWritesPerMin, b.tokens + (now - b.at) * rate);
+    b.at = now;
+    if (b.tokens < count) { policy.mailDropped = (policy.mailDropped || 0) + 1; return false; }
+    b.tokens -= count;
+    return true;
+  };
 
   // Incoming: runs before Gun's own handler because 'opt' fires first.
   root.on('in', function (msg) {
@@ -65,15 +82,19 @@ Gun.on('opt', function (root) {
     if (put) {
       if (put['#'] && put['.'] !== undefined) {                           // single-key form
         if (soulBlocked(put['#']) || keyBlocked(put['#'], put['.']) || tooBig(put[':'])) return;
+        if (MAIL_RE.test(put['#']) && !mailAllowed(msg, 1)) return;
       } else {                                                             // graph form
+        let mailKeys = 0;
         for (const soul of Object.keys(put)) {
           const node = put[soul];
           if (soulBlocked(soul)) return;
           for (const key of Object.keys(node || {})) {
             if (key === '_') continue;
             if (keyBlocked(soul, key) || tooBig(node[key])) return;
+            if (MAIL_RE.test(soul)) mailKeys++;
           }
         }
+        if (mailKeys && !mailAllowed(msg, mailKeys)) return;
       }
     }
     const get = msg && msg.get;
@@ -206,6 +227,7 @@ async function start(options = {}) {
     mailFrom: options.mailFrom ?? env.MAIL_FROM ?? 'Lain IO <no-reply@lain.io>',
     production: options.production ?? env.NODE_ENV === 'production',
     mailRetentionDays: Number(options.mailRetentionDays ?? env.MAIL_RETENTION_DAYS ?? 30),
+    mailWritesPerMin: Number(options.mailWritesPerMin ?? env.MAIL_WRITES_PER_MIN ?? 600),
     maxValueBytes: Number(options.maxValueBytes ?? env.MAX_VALUE_BYTES ?? 65_536),
     persist: options.persist ?? true,
     ipfsApi: options.ipfsApi ?? env.IPFS_API ?? '',
@@ -230,6 +252,7 @@ async function start(options = {}) {
     bannedMedia: new Set(),
     purged: new Set(readJson(purgedFile, [])),
     mailRetentionDays: o.mailRetentionDays,
+    mailWritesPerMin: o.mailWritesPerMin,
     maxValueBytes: o.maxValueBytes,
   };
   const limit = rateLimiter();
@@ -245,7 +268,7 @@ async function start(options = {}) {
   let gun;
   let media = null;
   const routes = {
-    'GET /lain/health': async () => [200, { ok: true, registrar: Boolean(o.registrarPair), moderation: Boolean(o.moderationPub), media: media ? { store: media.store, healthy: await media.health() } : null }],
+    'GET /lain/health': async () => [200, { ok: true, registrar: Boolean(o.registrarPair), moderation: Boolean(o.moderationPub), media: media ? { store: media.store, healthy: await media.health() } : null, mail: { retentionDays: policy.mailRetentionDays, writesPerMin: policy.mailWritesPerMin, dropped: policy.mailDropped || 0 } }],
 
     'POST /lain/registrar/claim': async (body) => {
       if (!o.registrarPair) return [404, { error: 'no registrar on this relay' }];

@@ -2,6 +2,6 @@
 // libsignal, because both read globalThis.crypto when their modules load.
 import './src/db/polyfills';
 import { registerRootComponent } from 'expo';
-import App from './App';
+import App from './src/app/App';
 
 registerRootComponent(App);

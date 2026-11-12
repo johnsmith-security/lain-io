@@ -219,7 +219,7 @@ src/gun/
   hooks.ts        useGunNode / useGunSet with correct unsubscribe
 ```
 
-Split `App.tsx` into `screens/` (Feed, Lain, Friends, Messages, Settings, Onboarding) while doing this; the closure-based page renderers won't survive real data hooks.
+Done (2026-11-10): `App.tsx` is split into `src/app` (shell, navigation), `src/features/<screen>` and `src/ui`; see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 

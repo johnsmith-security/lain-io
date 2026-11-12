@@ -5,9 +5,11 @@ import { GLView, ExpoWebGLRenderingContext } from 'expo-gl';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ActivityIndicator, LayoutChangeEvent, PanResponder, PixelRatio, StyleSheet, Text, View } from 'react-native';
+import { C } from '../../theme/colors';
+import { themedStyles } from '../../theme/themedStyles';
 
 // Keep the asset reference static so Metro includes it in the native bundle.
-const LAIN_MODEL_ASSET = require('../lain.glb');
+const LAIN_MODEL_ASSET = require('../../../assets/models/lain.glb');
 
 function removeMissingTextureReferences(source: ArrayBuffer): ArrayBuffer {
   const sourceBytes = new Uint8Array(source);
@@ -166,28 +168,27 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
     };
     const wiredLook = visualStyle === 'wired';
     let lastVisualStyle = visualStyle;
-    const clearColor = wiredLook ? 0x07121c : 0x10091e;
+    const asHex = (value: string) => Number.parseInt(value.slice(1), 16);
+    const clearColor = asHex(C.panelDeep);
     renderer.setClearColor(clearColor, 1);
 
     const scene = new THREE.Scene();
     scene.fog = new THREE.Fog(clearColor, 7, 14);
     const camera = new THREE.PerspectiveCamera(32, gl.drawingBufferWidth / gl.drawingBufferHeight, 0.01, 100);
     scene.add(new THREE.HemisphereLight(0xe9d5ff, 0x24143a, 2.1));
-    const key = new THREE.DirectionalLight(wiredLook ? 0x8bb8c7 : 0xff9fea, 3.2);
+    const key = new THREE.DirectionalLight(asHex(wiredLook ? C.cyan : C.pink), 3.2);
     key.position.set(-3, 5, 5);
     scene.add(key);
-    const fill = new THREE.DirectionalLight(wiredLook ? 0x63a6b8 : 0x59f3ff, 1.8);
+    const fill = new THREE.DirectionalLight(asHex(C.cyan), 1.8);
     fill.position.set(3, 1, 4);
     scene.add(fill);
-    const rim = new THREE.PointLight(wiredLook ? 0x498395 : 0x59f3ff, 15, 12);
+    const rim = new THREE.PointLight(asHex(C.cyan), 15, 12);
     rim.position.set(3, 2, -2);
     scene.add(rim);
 
     const avatar = new THREE.Group();
     scene.add(avatar);
-    const grid = wiredLook
-      ? new THREE.GridHelper(12, 24, 0x34788a, 0x1b3544)
-      : new THREE.GridHelper(12, 24, 0x913cbd, 0x30234f);
+    const grid = new THREE.GridHelper(12, 24, asHex(C.lineStrong), asHex(C.line));
     scene.add(grid);
 
     try {
@@ -263,13 +264,13 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
         if (visualStyleRef.current !== lastVisualStyle) {
           lastVisualStyle = visualStyleRef.current;
           const useWiredLook = lastVisualStyle === 'wired';
-          const nextClear = useWiredLook ? 0x07121c : 0x10091e;
+          const nextClear = asHex(C.panelDeep);
           renderer.setClearColor(nextClear, 1);
           (scene.fog as THREE.Fog).color.setHex(nextClear);
-          key.color.setHex(useWiredLook ? 0x8bb8c7 : 0xff9fea);
-          fill.color.setHex(useWiredLook ? 0x63a6b8 : 0x59f3ff);
-          rim.color.setHex(useWiredLook ? 0x498395 : 0x59f3ff);
-          const gridColors = useWiredLook ? [0x34788a, 0x1b3544] : [0x913cbd, 0x30234f];
+          key.color.setHex(asHex(useWiredLook ? C.cyan : C.pink));
+          fill.color.setHex(asHex(C.cyan));
+          rim.color.setHex(asHex(C.cyan));
+          const gridColors = [asHex(C.lineStrong), asHex(C.line)];
           const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
           gridMaterials.forEach((material, index) => material.color?.setHex(gridColors[index % 2]));
         }
@@ -322,18 +323,18 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
 
   return <View onLayout={onLayout} {...panResponder.panHandlers} style={[styles.stage, fill ? styles.fillStage : { height: stageHeight }]}>
     <GLView style={styles.gl} onContextCreate={onContextCreate} />
-    {isLoading && <View pointerEvents="none" style={styles.loading}><ActivityIndicator color="#59f3ff" /><Text style={styles.loadingText}>LOADING MODEL</Text></View>}
+    {isLoading && <View pointerEvents="none" style={styles.loading}><ActivityIndicator color={C.cyan} /><Text style={styles.loadingText}>LOADING MODEL</Text></View>}
     {loadError && <View pointerEvents="none" style={styles.error}><Text style={styles.errorText}>Couldn’t load lain.glb</Text><Text style={styles.errorDetail}>{loadErrorMessage}</Text></View>}
   </View>;
 }
 
-const styles = StyleSheet.create({
+const styles = themedStyles(() => StyleSheet.create({
   stage: { overflow: 'hidden', borderRadius: 18 },
   fillStage: { flex: 1, borderRadius: 0 },
   gl: { flex: 1 },
   loading: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, alignItems: 'center', justifyContent: 'center', gap: 8 },
-  loadingText: { fontSize: 8, letterSpacing: 1.6, color: '#59f3ff', fontWeight: '700' },
+  loadingText: { fontSize: 8, letterSpacing: 1.6, color: C.cyan, fontWeight: '700' },
   error: { position: 'absolute', bottom: 42, left: 0, right: 0, alignItems: 'center' },
-  errorText: { color: '#ff4fd8', fontSize: 11, fontWeight: '700' },
-  errorDetail: { color: '#d1c1e2', fontSize: 8, marginTop: 4, paddingHorizontal: 16, textAlign: 'center' },
-});
+  errorText: { color: C.danger, fontSize: 11, fontWeight: '700' },
+  errorDetail: { color: C.muted, fontSize: 8, marginTop: 4, paddingHorizontal: 16, textAlign: 'center' },
+}));
