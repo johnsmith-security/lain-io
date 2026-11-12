@@ -8,6 +8,7 @@ type TextInputHandle = ComponentRef<typeof TextInput>;
 import { GEMMA_MODEL_URL, LAIN_VOICE_URL, LainAi, type VoiceEffect } from '../../../modules/lain-ai/src';
 import { useKeyboard } from '../../app/keyboard';
 import { errorMessage } from '../../lib/alerts';
+import { MouthTrack } from './mouth';
 
 export type LainStatus = 'missing' | 'downloaded' | 'downloading' | 'loading' | 'ready' | 'thinking' | 'listening' | 'processing' | 'speaking' | 'error';
 /** Lain's own neural voice: not downloaded yet, downloading, or installed. */
@@ -32,6 +33,8 @@ type LainState = {
   voiceProgress: number;
   downloadVoice: () => Promise<void>;
   setVoiceEffect: (effect: VoiceEffect) => void;
+  /** Where her mouth is while she speaks; read by the avatar every frame (never re-renders). */
+  mouth: MouthTrack;
   toggleListening: () => Promise<void>;
 };
 
@@ -50,6 +53,8 @@ export function LainProvider({ children }: { children: React.ReactNode }) {
   const composerRef = useRef<TextInputHandle | null>(null);
   const [voice, setVoice] = useState<VoiceStatus>(() => (LainAi?.getVoiceStatus?.().installed ? 'ready' : 'missing'));
   const [voiceProgress, setVoiceProgress] = useState(0);
+  const mouth = useRef(new MouthTrack()).current;
+  mouth.driven = voice === 'ready';
   // Native callbacks need the current status synchronously.
   const statusRef = useRef(status);
   const setStatus = useCallback((next: LainStatus) => { statusRef.current = next; setStatusState(next); }, []);
@@ -98,10 +103,11 @@ export function LainProvider({ children }: { children: React.ReactNode }) {
           setStatus(current === 'speaking' || current === 'listening' ? 'ready' : current);
         } else if (state === 'listening' || state === 'processing' || state === 'speaking') setStatus(state);
       }),
-      LainAi.addListener('onSpeechDone', () => { setStatus('ready'); }),
+      LainAi.addListener('onVoiceMouth', ({ at, step, open }) => { mouth.push(at, step, open); }),
+      LainAi.addListener('onSpeechDone', () => { mouth.clear(); setStatus('ready'); }),
     ];
     return () => subs.forEach((sub) => sub.remove());
-  }, [send, setStatus]);
+  }, [send, setStatus, mouth]);
 
   const preparing = useRef(false);
   /** Download (first time) and load the model. `quiet` skips the "connected" popup, for auto-load at launch. */
@@ -186,8 +192,8 @@ export function LainProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo<LainState>(() => ({
     available: Boolean(LainAi), status, messages, error, progress, draft, setDraft, composerRef, send, prepare, toggleListening,
-    voice, voiceProgress, downloadVoice, setVoiceEffect,
-  }), [status, messages, error, progress, draft, send, prepare, toggleListening, voice, voiceProgress, downloadVoice, setVoiceEffect]);
+    voice, voiceProgress, downloadVoice, setVoiceEffect, mouth,
+  }), [status, messages, error, progress, draft, send, prepare, toggleListening, voice, voiceProgress, downloadVoice, setVoiceEffect, mouth]);
   return <LainContext.Provider value={value}>{children}</LainContext.Provider>;
 }
 

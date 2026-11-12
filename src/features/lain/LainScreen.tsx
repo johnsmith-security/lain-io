@@ -39,7 +39,7 @@ export function LainScreen() {
           <LainLog hidden={!compact} />
           <View style={[styles.frame, compact && styles.compactFrame, visualStyle === 'wired' && styles.wiredFrame]}>
             <View style={styles.meta}><Text style={styles.tag}>3D ARCHIVE</Text><Text style={styles.stageStatus}>● {stageLabel(lain.status)}</Text></View>
-            <AvatarScene animationState={lain.status} fill={compact} visualStyle={visualStyle} />
+            <AvatarScene animationState={lain.status} fill={compact} visualStyle={visualStyle} mouth={lain.mouth} />
             <View style={styles.caption}><Text style={styles.name}>Lain</Text><Text style={styles.hint}>{compact ? 'SWIPE ↔ TO ROTATE' : 'ROTATE · EXPLORE · CONNECT'}</Text></View>
           </View>
         </View>

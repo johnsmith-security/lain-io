@@ -7,6 +7,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ActivityIndicator, LayoutChangeEvent, PanResponder, PixelRatio, StyleSheet, Text, View } from 'react-native';
 import { C } from '../../theme/colors';
 import { themedStyles } from '../../theme/themedStyles';
+import type { MouthTrack } from './mouth';
 
 // Keep the asset reference static so Metro includes it in the native bundle.
 const LAIN_MODEL_ASSET = require('../../../assets/models/lain.glb');
@@ -92,13 +93,48 @@ function applyVaporwaveMaterials(root: THREE.Object3D) {
   });
 }
 
+/** How far her jaw opens at full volume (radians). Lain speaks quietly: keep it small. */
+const JAW_MAX = 0.14;
+
+/**
+ * Finds the jaw's hinge: the model's left-right axis, in the jaw's parent frame (the MMD rig's bone
+ * axes are rotated, so it isn't simply X). The direction is whichever way moves the lower lip down.
+ * Returns a function that poses the jaw open by 0–1.
+ */
+function jawRig(model: THREE.Object3D): ((open: number) => void) | null {
+  const jaw = model.getObjectByName('下顎');
+  const lip = model.getObjectByName('中下唇') ?? jaw?.children[0];
+  if (!jaw?.parent || !lip) return null;
+  model.updateWorldMatrix(true, true);
+  const base = jaw.quaternion.clone();
+  const parentWorld = jaw.parent.getWorldQuaternion(new THREE.Quaternion());
+  const hinge = new THREE.Vector3(1, 0, 0)
+    .applyQuaternion(model.getWorldQuaternion(new THREE.Quaternion()))
+    .applyQuaternion(parentWorld.invert())
+    .normalize();
+  const turn = new THREE.Quaternion();
+  const pose = (angle: number) => {
+    jaw.quaternion.copy(turn.setFromAxisAngle(hinge, angle)).multiply(base);
+  };
+  const lipHeight = (angle: number) => {
+    pose(angle);
+    lip.updateWorldMatrix(true, false);
+    return lip.getWorldPosition(new THREE.Vector3()).y;
+  };
+  const direction = lipHeight(0.2) < lipHeight(-0.2) ? 1 : -1;
+  pose(0);
+  return (open: number) => pose(direction * open * JAW_MAX);
+}
+
 type AvatarActivity = 'missing' | 'downloaded' | 'downloading' | 'loading' | 'ready' | 'thinking' | 'listening' | 'processing' | 'speaking' | 'error';
 
-export default function AvatarScene({ animationState = 'ready', stageHeight = 300, fill = false, visualStyle = 'vaporwave' }: { animationState?: AvatarActivity; stageHeight?: number; fill?: boolean; visualStyle?: 'vaporwave' | 'wired' }) {
+export default function AvatarScene({ animationState = 'ready', stageHeight = 300, fill = false, visualStyle = 'vaporwave', mouth }: { animationState?: AvatarActivity; stageHeight?: number; fill?: boolean; visualStyle?: 'vaporwave' | 'wired'; mouth?: MouthTrack }) {
   const frameRef = useRef<number | null>(null);
   const pixelSizeRef = useRef<{ width: number; height: number } | null>(null);
   const animationStateRef = useRef(animationState);
   const visualStyleRef = useRef(visualStyle);
+  const mouthRef = useRef(mouth);
+  mouthRef.current = mouth;
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [loadErrorMessage, setLoadErrorMessage] = useState('');
@@ -259,6 +295,9 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
       const leftArm = model.getObjectByName('腕.L');
       const rightArm = model.getObjectByName('腕.R');
       const baseRotations = [head, neck, leftArm, rightArm].map((bone) => bone?.rotation.clone());
+      const openJaw = jawRig(model);
+      if (!openJaw) console.warn('[Lain model] no jaw bone (下顎); she will speak without moving her mouth.');
+      let mouthOpen = 0;
       const render = () => {
         frameRef.current = requestAnimationFrame(render);
         if (visualStyleRef.current !== lastVisualStyle) {
@@ -279,9 +318,16 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
         const listening = currentState === 'listening' || currentState === 'processing';
         const thinking = currentState === 'thinking';
         const speaking = currentState === 'speaking';
+        // Mouth: follow the voice's own track (timed to when each sound is heard). The system
+        // voice has no track, so then she moves her mouth on a timer while speaking.
+        const heard = mouthRef.current?.sample(Date.now());
+        const target = heard ?? (speaking ? Math.max(0, 0.35 + 0.45 * Math.sin(t * 11) * Math.sin(t * 7.3)) : 0);
+        // Opens quickly on a syllable, closes a little slower: reads as speech, not flapping.
+        mouthOpen += (target - mouthOpen) * (target > mouthOpen ? 0.6 : 0.3);
+        openJaw?.(mouthOpen);
         if (head && baseRotations[0]) {
-          // Only a speaking nod and a listening/thinking head tilt; no idle sway.
-          head.rotation.x = baseRotations[0].x + (speaking ? Math.sin(t * 5) * 0.08 : 0);
+          // A slight lift with each syllable and a slow nod while speaking; listening/thinking tilts.
+          head.rotation.x = baseRotations[0].x + (speaking ? mouthOpen * 0.035 + Math.sin(t * 1.8) * 0.02 : 0);
           head.rotation.z = baseRotations[0].z + (listening ? -0.12 : thinking ? 0.09 : 0);
         }
         if (neck && baseRotations[1]) neck.rotation.z = baseRotations[1].z + (listening ? -0.08 : thinking ? 0.06 : 0);

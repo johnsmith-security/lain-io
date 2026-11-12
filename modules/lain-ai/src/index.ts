@@ -1,5 +1,7 @@
 import { EventSubscription, requireOptionalNativeModule } from 'expo-modules-core';
 
+/** One spoken sentence's mouth track: `open` is comma-separated 0–100 values, one per `step` ms from `at` (epoch ms, when it is heard). */
+export type VoiceMouth = { at: number; step: number; open: string };
 export type ModelDownloadProgress = { downloadedBytes: number; totalBytes: number };
 /** 'wired': phone-line tone, small room, faint static. 'clean': the voice alone. */
 export type VoiceEffect = 'wired' | 'clean';
