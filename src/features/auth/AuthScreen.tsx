@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { USERNAME_RULE, checkPassword, getDb, validateUsername } from '../../db/native';
 import { errorMessage } from '../../lib/alerts';
+import { LINKS, MIN_AGE, openLink } from '../../lib/links';
 import { C } from '../../theme/colors';
 import { Brand } from '../../ui/Brand';
 import { Button } from '../../ui/Button';
@@ -19,12 +20,14 @@ export function AuthScreen() {
   const [email, setEmail] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [adult, setAdult] = useState(false);
   const creating = mode === 'create';
 
   const submit = async () => {
     const nameError = validateUsername(username);
     if (nameError) { setError(nameError); return; }
     if (creating) { const pwError = checkPassword(password, username); if (pwError) { setError(pwError); return; } }
+    if (creating && !adult) { setError(`Lain IO is for people aged ${MIN_AGE} and over. Confirm your age to continue.`); return; }
     else if (!password) { setError('Enter your password.'); return; }
     setBusy(true);
     setError('');
@@ -72,13 +75,24 @@ export function AuthScreen() {
           <TextInput value={email} onChangeText={setEmail} onSubmitEditing={() => void submit()} placeholder="email for recovery (optional)" placeholderTextColor={C.muted} keyboardType="email-address" autoCapitalize="none" autoCorrect={false} autoComplete="email" textContentType="emailAddress" returnKeyType="go" accessibilityLabel="Recovery email (optional)" style={styles.input} />
         </View>
       )}
+      {creating && (
+        <Pressable onPress={() => { setAdult(!adult); if (error) setError(''); }} style={styles.age} accessibilityRole="checkbox" accessibilityState={{ checked: adult }}>
+          <View style={[styles.box, adult && styles.boxOn]}>{adult && <Text style={styles.tick}>✓</Text>}</View>
+          <Text style={styles.ageText}>I’m {MIN_AGE} or older</Text>
+        </Pressable>
+      )}
       <Text style={error ? styles.error : styles.hint}>{error || (creating ? USERNAME_RULE : 'Use the username and password you created.')}</Text>
       <Button title={creating ? 'Enter the Wired  →' : 'Sign in  →'} busy={busy} onPress={() => void submit()} />
       <Pressable onPress={() => { setMode(creating ? 'signin' : 'create'); setError(''); }} style={styles.switch}>
         <Text style={styles.switchText}>{creating ? 'ALREADY CONNECTED? SIGN IN' : 'NEW HERE? CREATE AN ACCOUNT'}</Text>
         <Text style={styles.switchArrow}>→</Text>
       </Pressable>
-      <Text style={styles.legal}>Email is only used to recover your account. By continuing, you agree to our Terms of Service and Privacy Policy.</Text>
+      <Text style={styles.legal}>
+        Email is only used to recover your account. By continuing, you agree to our{' '}
+        <Text style={styles.link} onPress={() => openLink(LINKS.terms)}>Terms</Text>,{' '}
+        <Text style={styles.link} onPress={() => openLink(LINKS.guidelines)}>Community guidelines</Text> and{' '}
+        <Text style={styles.link} onPress={() => openLink(LINKS.privacy)}>Privacy policy</Text>.
+      </Text>
     </ScrollView>
   );
 }
@@ -100,4 +114,10 @@ const styles = themedStyles(() => StyleSheet.create({
   switchText: { fontSize: 10, fontWeight: '700', letterSpacing: 1.4, color: C.ink },
   switchArrow: { color: C.cyan, fontSize: 16 },
   legal: { textAlign: 'center', fontSize: 9, color: C.muted, lineHeight: 15, marginTop: 8 },
+  link: { color: C.cyan, textDecorationLine: 'underline' },
+  age: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 12 },
+  box: { width: 20, height: 20, borderRadius: 6, borderWidth: 1, borderColor: C.lineStrong, backgroundColor: C.panel, alignItems: 'center', justifyContent: 'center' },
+  boxOn: { borderColor: C.cyan, backgroundColor: C.panelRaised },
+  tick: { color: C.cyan, fontSize: 13, fontWeight: '700' },
+  ageText: { color: C.ink, fontSize: 13 },
 }));

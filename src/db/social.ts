@@ -103,6 +103,7 @@ export class Social {
 
   isVisible(post: Post): boolean {
     if (this.moderation.isPubBanned(post.author) || this.moderation.isPostBanned(post.ref)) return false;
+    if (this.moderation.isExpired(post)) return false;                       // retention: past a month, not a top post
     if (this.safety.isBlocked(post.author)) return false;
     const muted = this.safety.get().mutedWords;
     if (muted.length) {

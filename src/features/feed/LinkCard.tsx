@@ -4,25 +4,29 @@ import React from 'react';
 import { Image, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import type { LinkPreview } from '../../db/native';
 import { C } from '../../theme/colors';
+import { ExternalMedia } from '../../ui/media/ExternalMedia';
+import { externalMediaUrl } from '../../ui/media/mediaLinks';
 
 const providerLabel = (link: LinkPreview) =>
   link.provider === 'youtube' ? 'YOUTUBE' : link.provider === 'peertube' ? 'PEERTUBE' : new URL(link.url).hostname.toUpperCase();
 
 export function LinkCard({ link }: { link: LinkPreview }) {
+  const externalMedia = externalMediaUrl(link.url);
   return (
-    <Pressable onPress={() => void Linking.openURL(link.url)} style={styles.card} accessibilityRole="link">
-      {link.thumbnail ? (
+    <View style={styles.card}>
+      {externalMedia ? <ExternalMedia url={link.url} thumbnail={link.thumbnail} /> : link.thumbnail ? (
         <View>
           <Image source={{ uri: link.thumbnail }} resizeMode="cover" style={styles.thumb} />
           {link.provider !== 'link' ? <Text style={styles.play}>▶</Text> : null}
         </View>
       ) : null}
-      <View style={styles.meta}>
+      <Pressable onPress={() => void Linking.openURL(link.url)} style={styles.meta} accessibilityRole="link">
         <Text style={styles.provider}>{providerLabel(link)}</Text>
         <Text numberOfLines={2} style={styles.title}>{link.title}</Text>
         {link.author ? <Text style={styles.author}>{link.author}</Text> : null}
-      </View>
-    </Pressable>
+        <Text numberOfLines={1} style={styles.url}>{link.url}</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -34,4 +38,5 @@ const styles = themedStyles(() => StyleSheet.create({
   provider: { color: C.cyan, fontSize: 8, letterSpacing: 1.6, fontWeight: '800' },
   title: { color: C.ink, fontSize: 13, fontWeight: '700', marginTop: 4 },
   author: { color: C.muted, fontSize: 11, marginTop: 2 },
+  url: { color: C.cyan, fontSize: 9, marginTop: 5 },
 }));

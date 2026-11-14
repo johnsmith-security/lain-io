@@ -13,7 +13,7 @@
         "expo-asset",
         {
           "assets": [
-            "./lain.glb"
+            "./assets/models/lain.glb"
           ]
         }
       ],

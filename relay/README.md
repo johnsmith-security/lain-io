@@ -15,6 +15,7 @@ REGISTRAR_PAIR='…' MODERATION_PUB=… SMTP_URL=smtps://user:pass@smtp.example.
 | `RELAY_PEERS` | Other relays to sync with (comma-separated `wss://…/gun`) |
 | `REGISTRAR_PAIR` | Registrar key pair JSON. Set on **one** node only; that node owns username ordering |
 | `MODERATION_PUB` | Moderation account; its bans are enforced on reads and writes |
+| `MODERATION_URL` | Cloudflare relay's signed list (`https://relay.lain.xn--tckwe/lain/moderation`), the single source of truth. Pulled every minute and SEA-verified |
 | `SMTP_URL`, `MAIL_FROM` | Recovery email. Without them: dev mode prints codes; production returns 503 |
 | `MAIL_RETENTION_DAYS` (30), `MAX_VALUE_BYTES` (65536) | Limits |
 | `MAIL_WRITES_PER_MIN` (600) | Mail envelopes (messages + receipts) one connection may write per minute; the excess is dropped without an ack and the client's outbox retries. `/lain/health` reports `mail.dropped`. |

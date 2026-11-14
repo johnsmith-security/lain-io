@@ -69,9 +69,10 @@ export class LainData {
 
   // ---------- chats ----------
 
-  async addChatMessage(chatId: string, role: LainChatMessage['role'], text: string): Promise<LainChatMessage> {
+  /** `id`/`at` let the caller show the message before the write finishes and match it up afterwards. */
+  async addChatMessage(chatId: string, role: LainChatMessage['role'], text: string, opts: { id?: string; at?: number } = {}): Promise<LainChatMessage> {
     const { pair } = requirePair(this.ctx);
-    const message: LainChatMessage = { id: newId(), chatId, role, text: text.slice(0, 20_000), at: Date.now() };
+    const message: LainChatMessage = { id: opts.id ?? newId(), chatId, role, text: text.slice(0, 20_000), at: opts.at ?? Date.now() };
     await this.writeChatMessage(message, pair);
     await putAck(meNode(this.ctx).get('lain').get('chatIndex').get(chatId), await encryptFor({ title: role === 'you' ? text.slice(0, 60) : '', updatedAt: message.at }, pair));
     if (role === 'you') this.recordSignal({ kind: 'lain-chat', data: text.slice(0, 500) });

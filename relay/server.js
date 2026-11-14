@@ -14,6 +14,9 @@
 //   - drops mail envelopes older than MAIL_RETENTION_DAYS
 //   - rate-limits mail writes per connection (MAIL_WRITES_PER_MIN) so one client can't flood mailboxes
 //   - rejects oversized values
+//   - post retention (plan §2b): posts older than RETENTION_DAYS (from RETENTION_EPOCH at the
+//     earliest) that aren't on the archivist's keep list are refused and not served. The Cloudflare
+//     relay ranks and decides; this relay follows its signed keep list.
 //
 // Run a single registrar (one node). Other main-relay nodes can run without
 // REGISTRAR_PAIR and proxy /lain/registrar/* to it.
@@ -33,6 +36,18 @@ const validName = (name) => typeof name === 'string' && /^[a-z0-9_]{3,20}$/.test
 const validEmail = (email) => typeof email === 'string' && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const parseSigned = (signed) => { try { return JSON.parse(String(signed).replace(/^SEA/, '')).m; } catch { return undefined; } };
 const sha256url = async (text) => String(await SEA.work(text, null, null, { name: 'SHA-256' })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const POSTS_RE = /^~([^/@][^/]*)\/posts$/;
+const RETENTION_GRACE_MS = 2 * 3_600_000;
+/** createdAt of a (signed) post value, or null. */
+function createdAtOf(val) {
+  try {
+    let v = typeof val === 'string' && val[0] === '{' ? JSON.parse(val) : val;
+    if (v && typeof v === 'object' && ':' in v) v = v[':'];
+    if (typeof v !== 'string') return null;
+    const at = Number(JSON.parse(v).createdAt);
+    return Number.isFinite(at) && at > 0 ? at : null;
+  } catch { return null; }
+}
 const pubOfSoul = (soul) => (typeof soul === 'string' && soul[0] === '~' && soul[1] !== '@' ? soul.slice(1).split('/')[0] : null);
 
 function readJson(file, fallback) { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } }
@@ -59,6 +74,15 @@ Gun.on('opt', function (root) {
     return Boolean(pub && soul === `~${pub}/posts` && policy.bannedPosts.has(`${pub}|${key}`));
   };
   const tooBig = (val) => typeof val === 'string' && val.length > policy.maxValueBytes;
+  const postExpired = (soul, key, val) => {
+    if (!policy.archivistPub || !policy.retentionDays) return false;
+    const m = POSTS_RE.exec(soul || '');
+    if (!m) return false;
+    const created = createdAtOf(val);
+    if (created === null) return false;
+    const born = Math.max(Math.min(created, Date.now()), policy.retentionEpoch || 0);
+    return born < Date.now() - policy.retentionDays * 86_400_000 - RETENTION_GRACE_MS && !policy.kept.has(`${m[1]}|${key}`);
+  };
   const MAIL_RE = /^lain-io\/mail\//;
   // Per-connection token bucket for mail writes. Gun sets msg._.via to the sending peer.
   const buckets = new WeakMap();
@@ -81,7 +105,7 @@ Gun.on('opt', function (root) {
     const put = msg && msg.put;
     if (put) {
       if (put['#'] && put['.'] !== undefined) {                           // single-key form
-        if (soulBlocked(put['#']) || keyBlocked(put['#'], put['.']) || tooBig(put[':'])) return;
+        if (soulBlocked(put['#']) || keyBlocked(put['#'], put['.']) || tooBig(put[':']) || postExpired(put['#'], put['.'], put[':'])) return;
         if (MAIL_RE.test(put['#']) && !mailAllowed(msg, 1)) return;
       } else {                                                             // graph form
         let mailKeys = 0;
@@ -90,7 +114,7 @@ Gun.on('opt', function (root) {
           if (soulBlocked(soul)) return;
           for (const key of Object.keys(node || {})) {
             if (key === '_') continue;
-            if (keyBlocked(soul, key) || tooBig(node[key])) return;
+            if (keyBlocked(soul, key) || tooBig(node[key]) || postExpired(soul, key, node[key])) return;
             if (MAIL_RE.test(soul)) mailKeys++;
           }
         }
@@ -113,7 +137,7 @@ Gun.on('opt', function (root) {
       for (const soul of Object.keys(put)) {
         if (soulBlocked(soul)) { changed = true; continue; }
         const node = put[soul];
-        const keys = Object.keys(node || {}).filter((key) => key !== '_' && keyBlocked(soul, key));
+        const keys = Object.keys(node || {}).filter((key) => key !== '_' && (keyBlocked(soul, key) || postExpired(soul, key, node[key])));
         if (!keys.length) { filtered[soul] = node; continue; }
         changed = true;
         const copy = { ...node, _: { ...(node._ || {}), '>': { ...((node._ || {})['>'] || {}) } } };
@@ -124,7 +148,7 @@ Gun.on('opt', function (root) {
         if (!Object.keys(filtered).length) return;
         msg = { ...msg, put: filtered };
       }
-    } else if (put && put['#'] && (soulBlocked(put['#']) || keyBlocked(put['#'], put['.']))) {
+    } else if (put && put['#'] && (soulBlocked(put['#']) || keyBlocked(put['#'], put['.']) || postExpired(put['#'], put['.'], put[':']))) {
       return;
     }
     this.to.next(msg);
@@ -223,6 +247,12 @@ async function start(options = {}) {
     peers: options.peers ?? (env.RELAY_PEERS || '').split(',').map((s) => s.trim()).filter(Boolean),
     registrarPair: options.registrarPair ?? (env.REGISTRAR_PAIR ? JSON.parse(env.REGISTRAR_PAIR) : null),
     moderationPub: options.moderationPub ?? env.MODERATION_PUB ?? '',
+    // Cloudflare relay's signed moderation list; pulled every minute so this relay enforces the
+    // same bans even when it isn't peered with Cloudflare. SEA verifies every value.
+    moderationUrl: options.moderationUrl ?? env.MODERATION_URL ?? '',
+    archivistPub: options.archivistPub ?? env.ARCHIVIST_PUB ?? '',
+    retentionDays: Number(options.retentionDays ?? env.RETENTION_DAYS ?? 30),
+    retentionEpoch: Number(options.retentionEpoch ?? env.RETENTION_EPOCH ?? 1_794_528_000_000),
     smtpUrl: options.smtpUrl ?? env.SMTP_URL ?? '',
     mailFrom: options.mailFrom ?? env.MAIL_FROM ?? 'Lain IO <no-reply@lain.io>',
     production: options.production ?? env.NODE_ENV === 'production',
@@ -251,6 +281,10 @@ async function start(options = {}) {
     bannedPosts: new Set(),
     bannedMedia: new Set(),
     purged: new Set(readJson(purgedFile, [])),
+    kept: new Set(),
+    archivistPub: o.archivistPub,
+    retentionDays: o.retentionDays,
+    retentionEpoch: o.retentionEpoch,
     mailRetentionDays: o.mailRetentionDays,
     mailWritesPerMin: o.mailWritesPerMin,
     maxValueBytes: o.maxValueBytes,
@@ -267,6 +301,7 @@ async function start(options = {}) {
 
   let gun;
   let media = null;
+  let moderationTimer = null;
   const routes = {
     'GET /lain/health': async () => [200, { ok: true, registrar: Boolean(o.registrarPair), moderation: Boolean(o.moderationPub), media: media ? { store: media.store, healthy: await media.health() } : null, mail: { retentionDays: policy.mailRetentionDays, writesPerMin: policy.mailWritesPerMin, dropped: policy.mailDropped || 0 } }],
 
@@ -381,6 +416,27 @@ async function start(options = {}) {
     mod.get('media').map().on((value, key) => {
       if (value) { policy.bannedMedia.add(key); if (media) media.onBanned(key); } else policy.bannedMedia.delete(key);
     });
+    if (o.archivistPub) {
+      gun.get(`~${o.archivistPub}`).get('keep').map().on((value, key) => { if (value) policy.kept.add(key); else policy.kept.delete(key); });
+    }
+    if (o.moderationUrl) {
+      const pull = async () => {
+        try {
+          const res = await fetch(o.moderationUrl, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(10_000) });
+          if (!res.ok) return;
+          const body = await res.json();
+          if (body.moderationPub !== o.moderationPub || !body.graph) return;
+          const graph = {};
+          for (const [soul, node] of Object.entries(body.graph)) {
+            if (soul === `~${o.moderationPub}` || soul.startsWith(`~${o.moderationPub}/moderation`)) graph[soul] = node;
+            else if (o.archivistPub && (soul === `~${o.archivistPub}` || soul === `~${o.archivistPub}/keep`)) graph[soul] = node;
+          }
+          gun._.root.on('in', { '#': Math.random().toString(36).slice(2, 11), put: graph });
+        } catch (error) { o.log('[relay] moderation pull failed', error && error.message); }
+      };
+      void pull();
+      moderationTimer = setInterval(pull, 60_000);
+    }
   }
 
   media = createMedia({
@@ -404,6 +460,7 @@ async function start(options = {}) {
     media,
     close: () => new Promise((resolve) => {
       media.close();
+      if (moderationTimer) clearInterval(moderationTimer);
       try { Object.values(gun.back('opt.peers') || {}).forEach((peer) => { try { peer.wire && peer.wire.close(); } catch { /* noop */ } }); } catch { /* noop */ }
       server.closeAllConnections && server.closeAllConnections();
       server.close(() => resolve());

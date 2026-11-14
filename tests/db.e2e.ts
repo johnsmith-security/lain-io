@@ -46,9 +46,11 @@ async function main() {
   const registrar = await SEA.pair();
   const moderation = await SEA.pair();
   const release = await SEA.pair();
+  const archivist = await SEA.pair();
   const mails: Array<{ to: string; username: string; code: string }> = [];
   const relay = await relayModule.start({
     port: 0, host: '127.0.0.1', dataDir, persist: true, registrarPair: registrar, moderationPub: moderation.pub,
+    archivistPub: archivist.pub, retentionEpoch: 0,
     onMail: (m: any) => mails.push(m), log: () => {},
     // media: fake scanner (rejects one known-bad file, flags "adult" ones), low keep threshold, manual retention
     scan: async (buf: Buffer) => ({ ok: !buf.includes(Buffer.from('KNOWN-BAD')), adult: buf.includes(Buffer.from('ADULT')) }),
@@ -59,6 +61,7 @@ async function main() {
   const config = {
     peers: [relay.url], serviceUrl: relay.httpUrl, registrarPub: registrar.pub,
     moderationPub: moderation.pub, moderationEpub: moderation.epub, releasePub: release.pub,
+    archivistPub: archivist.pub, retentionEpoch: 0,
     passwordIterations: 2000, readTimeoutMs: 2000,
   };
   const make = () => LainDb.create({ platform: platform(), config });
@@ -138,6 +141,27 @@ async function main() {
   await bob.safety.block(alice.session!.pub);
   check('blocked authors are hidden', !bob.social.isVisible({ ...reply, author: alice.session!.pub }));
   await bob.safety.unblock(alice.session!.pub);
+
+  console.log('\nPost retention (30 days; top posts kept by the archivist)');
+  const DAY = 86_400_000;
+  const aliceRef = (id: string) => `${alice.session!.pub}/${id}`;
+  check('a 40-day-old unkept post counts as expired', bob.moderation.isExpired({ ref: aliceRef('x'), createdAt: Date.now() - 40 * DAY }));
+  check('a 10-day-old post does not', !bob.moderation.isExpired({ ref: aliceRef('x'), createdAt: Date.now() - 10 * DAY }));
+  const archClient = Gun({ peers: [relay.url], localStorage: false, radisk: false, file: false, axe: false, multicast: false });
+  await new Promise<void>((res, rej) => archClient.user().auth(archivist, (ack: any) => (ack.err ? rej(ack.err) : res())));
+  archClient.user().get('keep').get(aliceRef('old-top').replace(/\//g, '|')).put(JSON.stringify({ score: 99, at: Date.now() }));
+  await waitFor('relay follows the archivist keep list', () => relay.policy.kept.has(aliceRef('old-top').replace(/\//g, '|')));
+  await waitFor('apps follow the archivist keep list', () => bob.moderation.isKept(aliceRef('old-top')));
+  const old = (id: string) => JSON.stringify({ id, body: `old ${id}`, createdAt: Date.now() - 40 * DAY });
+  alice.ctx.gun.user().get('posts').get('old-gone').put(old('old-gone'));
+  alice.ctx.gun.user().get('posts').get('old-top').put(old('old-top'));
+  let aliceTimeline: Post[] = [];
+  const stopProfile = bob.social.subscribeUserPosts(alice.session!.pub, (p) => { aliceTimeline = p; });
+  await waitFor('a kept month-old post still shows', () => aliceTimeline.some((p) => p.id === 'old-top'));
+  check('an unkept month-old post is hidden', !aliceTimeline.some((p) => p.id === 'old-gone'));
+  const relayCopy = await new Promise((res) => { setTimeout(() => res(undefined), 3000); archClient.get(`~${alice.session!.pub}`).get('posts').get('old-gone').once((v: unknown) => res(v), { wait: 1000 }); });
+  check('the self-hosted relay refused to store it', relayCopy === undefined, relayCopy);
+  stopProfile();
 
   console.log('\nEncrypted settings sync');
   await alice.settings.update({ quietMode: true, lainStyle: 'wired' });
@@ -262,6 +286,14 @@ async function main() {
   check('signals never sync', alice2.lain.listSignals().length === 0);
   const ctxPrompt = await alice.lain.promptContext();
   check('prompt context includes facts', ctxPrompt.facts.includes('Likes 90s synth music'));
+  const chatSeen: string[][] = [];
+  const stopChat = alice.lain.subscribeChat('main', (list) => chatSeen.push(list.map((m) => m.id)));
+  const q = await alice.lain.addChatMessage('main', 'you', 'hi lain', { id: 'chat-q-1', at: 1000 });
+  await alice.lain.addChatMessage('main', 'lain', 'present day, present time', { id: 'chat-a-1', at: 2000 });
+  check('a chat message keeps the id and time the app gave it', q.id === 'chat-q-1' && q.at === 1000);
+  await waitFor('the Lain chat emits both messages in order', () => chatSeen.some((ids) => ids.join() === 'chat-q-1,chat-a-1'));
+  stopChat();
+  await waitFor('the Lain chat is there after signing in again (second device)', async () => (await alice2.lain.listChat('main')).map((m) => m.id).join() === 'chat-q-1,chat-a-1');
 
   console.log('\nPassword change and email recovery');
   await rejects('change password needs the current password', alice.changePassword('nope-nope-nope-1', 'brand-new-password-1'), InvalidCredentialsError);

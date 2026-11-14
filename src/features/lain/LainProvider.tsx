@@ -1,12 +1,16 @@
 // On-device Lain: Gemma 4 E2B through the native lain-ai module (download, load,
 // generate, speech in/out). Lives above the screens so the loaded model and the
-// conversation survive switching tabs.
+// conversation survive switching tabs. The conversation is saved in the signed-in
+// user's Gun graph (encrypted, ~pub/lain/chats/main, persisted on the device with
+// radisk), so it survives restarts.
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
 import { Alert, PermissionsAndroid, TextInput } from 'react-native';
 
 type TextInputHandle = ComponentRef<typeof TextInput>;
 import { GEMMA_MODEL_URL, LAIN_VOICE_URL, LainAi, type VoiceEffect } from '../../../modules/lain-ai/src';
 import { useKeyboard } from '../../app/keyboard';
+import { getDb, newId } from '../../db/native';
+import { useLainChat, useSession } from '../../db/hooks';
 import { errorMessage } from '../../lib/alerts';
 import { MouthTrack } from './mouth';
 
@@ -43,10 +47,29 @@ export const ACTIVE_STATUSES: LainStatus[] = ['thinking', 'listening', 'processi
 
 const LainContext = createContext<LainState | null>(null);
 
+/** Lain has one continuous conversation per account. */
+const CHAT_ID = 'main';
+
 export function LainProvider({ children }: { children: React.ReactNode }) {
   const keyboard = useKeyboard();
   const [status, setStatusState] = useState<LainStatus>(LainAi ? 'missing' : 'error');
-  const [messages, setMessages] = useState<LainMessage[]>([]);
+  const session = useSession();
+  const saved = useLainChat(session ? CHAT_ID : null);
+  // Messages not yet seen back from Gun (just sent, or signed out). Dropped once saved.
+  const [local, setLocal] = useState<Array<LainMessage & { at: number }>>([]);
+  useEffect(() => { setLocal([]); }, [session?.pub]);
+  const messages = useMemo<LainMessage[]>(() => {
+    const ids = new Set(saved.map((m) => m.id));
+    return [...saved, ...local.filter((m) => !ids.has(m.id))].sort((a, b) => a.at - b.at).map(({ id, role, text }) => ({ id, role, text }));
+  }, [saved, local]);
+  const remember = useCallback((role: LainMessage['role'], text: string) => {
+    const message = { id: newId(), role, text, at: Date.now() };
+    setLocal((current) => [...current, message]);
+    try {
+      const db = getDb();
+      if (db.session) db.lain.addChatMessage(CHAT_ID, role, text, { id: message.id, at: message.at }).catch((failure) => console.warn('[Lain AI] could not save message', failure));
+    } catch { /* database not ready: keep it in memory */ }
+  }, []);
   const [draft, setDraft] = useState('');
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState('');
@@ -66,21 +89,21 @@ export function LainProvider({ children }: { children: React.ReactNode }) {
       keyboard.setVisible(true);
       requestAnimationFrame(() => composerRef.current?.focus());
     }
-    setMessages((current) => [...current, { id: `${Date.now()}-user`, role: 'you', text: prompt }]);
+    remember('you', prompt);
     setDraft('');
     setError('');
     setStatus('thinking');
     try {
       const answer = await LainAi.generate(prompt);
       if (!answer) throw new Error('Lain returned an empty response. Try a shorter message.');
-      setMessages((current) => [...current, { id: `${Date.now()}-lain`, role: 'lain', text: answer }]);
+      remember('lain', answer);
       setStatus('speaking');
       await LainAi.speak(answer);
     } catch (failure) {
       setError(errorMessage(failure, 'Lain could not answer right now.').slice(0, 180));
       setStatus('error');
     }
-  }, [keyboard, setStatus]);
+  }, [keyboard, setStatus, remember]);
 
   useEffect(() => {
     if (!LainAi) return;

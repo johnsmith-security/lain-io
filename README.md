@@ -30,3 +30,9 @@ The current `lain.glb` has a skeleton but no bundled animation clips or facial b
 To inspect model download diagnostics while the Android app is open, run `adb logcat -s LainAiDownload`. The log records the request host, HTTP status, response length/range, progress every 100 MB, final file size, and failure details. The React Native log also prints the rejected native error.
 
 The model is hosted by [LiteRT Community](https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm) under Apache-2.0. The model is downloaded from Hugging Face at runtime; no model weights are committed to this repository or embedded in the app binary.
+
+```sh
+cd "/Users/johnsmith/LainCorp/Lain IO/android"
+./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+adb install -r app/build/outputs/apk/release/app-release.apk
+```

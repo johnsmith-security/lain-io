@@ -39,6 +39,7 @@
     "react-native-nitro-modules": "^0.37.2",
     "react-native-quick-base64": "^3.0.1",
     "react-native-quick-crypto": "^1.1.9",
+    "react-native-webview": "14.0.1",
     "three": "0.162.0"
   },
   "devDependencies": {

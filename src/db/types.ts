@@ -35,6 +35,7 @@ export type Profile = {
 /** A post reference: `<authorPub>/<postId>`. Stable across edits. */
 export type PostRef = string;
 
+
 /**
  * An uploaded image or video. Gun stores only this; the bytes live on the main
  * relay's media store (IPFS) under `sha` (SHA-256 hex of the file).

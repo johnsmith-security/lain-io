@@ -5,8 +5,9 @@
 // thumbnail) inside the post, and the bytes go to the main relay's media store
 // (IPFS-backed), addressed by their SHA-256:
 //
-//   POST {serviceUrl}/lain/media        upload (signed by the account key)
-//   GET  {serviceUrl}/lain/media/<sha>  download / stream (Range supported)
+//   POST {mediaUrl}/lain/media        upload (signed by the account key)
+//   GET  {mediaUrl}/lain/media/<sha>  download / stream (Range supported)
+// mediaUrl defaults to serviceUrl; it differs only while media still runs on the self-hosted relay.
 //
 // Retention is decided by the relay: post media lasts 30 days unless it becomes
 // popular (likes + reposts), avatars last while in use, DM attachments 30 days.
@@ -131,14 +132,17 @@ export class MediaError extends Error {
 export class Media {
   constructor(private ctx: Ctx, private moderation: Moderation) {}
 
+  /** Where image and video bytes live (defaults to the main relay's services). */
+  private get mediaUrl() { return this.ctx.config.mediaUrl || this.ctx.config.serviceUrl; }
+
   private get base() {
-    if (!this.ctx.config.serviceUrl) throw new MediaError('Media needs the main relay (EXPO_PUBLIC_LAIN_SERVICE_URL).');
-    return `${this.ctx.config.serviceUrl}/lain/media`;
+    if (!this.mediaUrl) throw new MediaError('Media needs the main relay (EXPO_PUBLIC_LAIN_MEDIA_URL or EXPO_PUBLIC_LAIN_SERVICE_URL).');
+    return `${this.mediaUrl}/lain/media`;
   }
 
   /** Download URL for a file. Empty when moderation removed it. */
   url(sha: string): string {
-    if (!SHA_RE.test(sha) || this.moderation.isMediaBanned(sha) || !this.ctx.config.serviceUrl) return '';
+    if (!SHA_RE.test(sha) || this.moderation.isMediaBanned(sha) || !this.mediaUrl) return '';
     return `${this.base}/${sha}`;
   }
 
@@ -191,7 +195,7 @@ export class Media {
   /** You no longer use this file (post deleted, avatar replaced). The relay deletes it once nobody does. */
   async release(sha: string): Promise<void> {
     const { pair } = requirePair(this.ctx);
-    if (!SHA_RE.test(sha) || !this.ctx.config.serviceUrl) return;
+    if (!SHA_RE.test(sha) || !this.mediaUrl) return;
     const request = await SEA.sign({ action: 'release', sha, at: Date.now() }, pair);
     await this.ctx.platform.fetch(`${this.base}/release`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pub: pair.pub, request }),

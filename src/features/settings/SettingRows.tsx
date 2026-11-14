@@ -17,9 +17,9 @@ export function SettingRow({ label, detail, value, onChange }: { label: string; 
 }
 
 /** A label with a value on the right. */
-export function SettingLink({ label, value }: { label: string; value: string }) {
+export function SettingLink({ label, value, onPress }: { label: string; value: string; onPress?: () => void }) {
   return (
-    <Pressable style={rows.row}>
+    <Pressable style={rows.row} onPress={onPress} disabled={!onPress} accessibilityRole={onPress ? 'link' : undefined}>
       <View style={{ flex: 1 }}><Text style={rows.label}>{label}</Text></View>
       <Text style={rows.value}>{value}</Text>
       <Text style={rows.chevron}>›</Text>

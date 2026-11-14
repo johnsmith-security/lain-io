@@ -9,6 +9,7 @@ import { showError } from '../../lib/alerts';
 import { C } from '../../theme/colors';
 import { common } from '../../theme/common';
 import { AvatarFace } from '../../ui/AvatarFace';
+import { firstExternalMediaUrl } from '../../ui/media/mediaLinks';
 import { AttachmentChip } from '../../ui/media/AttachmentChip';
 
 export function Composer() {
@@ -33,7 +34,7 @@ export function Composer() {
     try {
       const db = getDb();
       const media = await uploadPrepared(db, attachments.map((item) => ({ ...item, sensitive: item.sensitive || sensitive })));
-      const url = findLink(text);
+      const url = firstExternalMediaUrl(text) ?? findLink(text);
       const link = url ? await db.media.linkPreview(url) : undefined;
       await db.social.createPost(text, { media, link });
       setDraft(''); setAttachments([]); setSensitive(false);

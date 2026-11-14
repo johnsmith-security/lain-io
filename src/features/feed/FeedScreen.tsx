@@ -22,7 +22,7 @@ export function FeedScreen() {
     <ScreenScroll>
       <ScreenTitle eyebrow={longDate()} title={<>The Wired<Text style={{ color: C.pink }}>.</Text></>} subtitle="A place to exist together." />
       <Composer />
-      <View style={styles.sectionHead}><Eyebrow>RECENT SIGNALS</Eyebrow><Text style={common.liveCount}>◉  2.4k online</Text></View>
+      <View style={styles.sectionHead}><Eyebrow>RECENT SIGNALS</Eyebrow></View>
       {discovery.items.map((post) => <PostCard key={post.ref} post={post} showSensitive={showSensitive} me={session.pub} />)}
       {discovery.items.length === 0 && (
         <View style={common.card}>{discovery.loading ? <ActivityIndicator color={C.cyan} /> : <Text style={common.emptyText}>No signals yet. Transmit the first one.</Text>}</View>

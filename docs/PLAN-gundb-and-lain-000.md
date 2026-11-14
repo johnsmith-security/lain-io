@@ -235,6 +235,8 @@ Fine-tuning a 2B-parameter model needs a GPU server. A phone can't do it in reas
 
 ### B2. Shipping lain-000 (the baseline)
 
+> **Superseded (2026-11-13):** lain-000 will now be trained from scratch and released fully open. See `Lain AI/lain-000/PLAN.md`. Until it beats Gemma 4 E2B, the app keeps shipping Gemma 4 E2B. The distribution, registry and app-integration parts below still apply.
+
 - **What it is:** Gemma 4 E2B (Apache-2.0) + a Lain persona fine-tune, converted to `.litertlm`, versioned `lain-000`, `lain-000.1`, …
 - **Training data:** a curated, original persona dataset written in-house (voice, values, refusals, how to talk about memory and the Wired), plus general instruction data so it doesn't lose general skills. No copyrighted script text from the anime.
 - **Training:** LoRA or full SFT on the base checkpoint (PEFT/TRL or Unsloth), then a small preference-tuning pass. Merge, convert to LiteRT-LM with the same mixed 2/4/8-bit quantization profile, and confirm on-device speed matches stock Gemma.

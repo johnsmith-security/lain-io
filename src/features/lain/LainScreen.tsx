@@ -10,6 +10,8 @@ import { common } from '../../theme/common';
 import { Eyebrow } from '../../ui/Eyebrow';
 import { ScreenScroll } from '../../ui/ScreenScroll';
 import { SendButton } from '../../ui/SendButton';
+import { ExternalMedia } from '../../ui/media/ExternalMedia';
+import { firstExternalMediaUrl } from '../../ui/media/mediaLinks';
 import AvatarScene from './AvatarScene';
 import { ACTIVE_STATUSES, useLain, type LainStatus } from './LainProvider';
 import { LainLog } from './LainLog';
@@ -100,6 +102,7 @@ function ModelCard({ hidden }: { hidden: boolean }) {
           {lain.messages.slice(-4).map((message) => (
             <View key={message.id} style={[styles.bubble, message.role === 'you' ? styles.bubbleYou : styles.bubbleLain]}>
               <Text style={styles.bubbleRole}>{message.role === 'you' ? 'YOU' : 'LAIN'}</Text>
+              {firstExternalMediaUrl(message.text) ? <View style={styles.linkMedia}><ExternalMedia url={firstExternalMediaUrl(message.text)!} /></View> : null}
               <Text style={styles.bubbleText}>{message.text}</Text>
             </View>
           ))}
@@ -158,6 +161,7 @@ const styles = themedStyles(() => StyleSheet.create({
   bubbleLain: { alignSelf: 'flex-start', backgroundColor: C.panelDeep, borderWidth: 1, borderColor: C.lineStrong },
   bubbleRole: { color: C.cyan, fontSize: 7, letterSpacing: 1.2, fontWeight: '800', marginBottom: 5 },
   bubbleText: { color: C.ink, fontSize: 11, lineHeight: 17 },
+  linkMedia: { width: '100%', marginTop: 8, borderRadius: 8, overflow: 'hidden' },
   error: { color: C.danger, fontSize: 9, lineHeight: 14, marginTop: 9 },
   compactDock: { marginHorizontal: 8, marginTop: 6, marginBottom: 6, padding: 6 },
 }));

@@ -1,14 +1,15 @@
 import { themedStyles } from '../../theme/themedStyles';
 // A post in the feed: author, text, media, link, repost, and like / relay actions.
-import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useState } from 'react';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useLikes, usePost, useProfile, useReposts } from '../../db/hooks';
-import { shortFingerprint, type Post } from '../../db/native';
+import { getDb, shortFingerprint, type Post, type Report } from '../../db/native';
 import { showError } from '../../lib/alerts';
 import { timeAgo } from '../../lib/time';
 import { C } from '../../theme/colors';
 import { common } from '../../theme/common';
 import { AvatarFace } from '../../ui/AvatarFace';
+import { ReportPanel } from '../../ui/ReportPanel';
 import { LinkCard } from './LinkCard';
 import { MediaGrid } from './MediaGrid';
 
@@ -47,6 +48,34 @@ export function PostCard({ post, showSensitive, me }: { post: Post; showSensitiv
   const handle = author ? `@${author.username}${author.verified === false ? ' · unverified' : ''}` : `@${shortFingerprint(post.author)}`;
   const like = () => { likes.toggle().catch(showError('Like failed')); };
   const relay = () => { if (!ownTarget) reposts.toggle().catch(showError('Relay failed')); };
+  const mine = post.author === me;
+  const [reporting, setReporting] = useState(false);
+  const [sending, setSending] = useState(false);
+  // ··· menu: report / block for other people's posts, delete for your own (Play & App Store UGC rules).
+  const menu = () => {
+    if (mine) {
+      Alert.alert('Your post', undefined, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete post', style: 'destructive', onPress: () => { getDb().social.deletePost(post.id).catch(showError('Couldn’t delete')); } },
+      ]);
+      return;
+    }
+    Alert.alert(name, undefined, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: `Block ${author ? `@${author.username}` : 'author'}`, style: 'destructive', onPress: () => Alert.alert('Block?', 'You won’t see their posts and they can’t message you.', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Block', style: 'destructive', onPress: () => { getDb().safety.block(post.author).catch(showError('Couldn’t block')); } },
+      ]) },
+      { text: 'Report post', onPress: () => setReporting(true) },
+    ]);
+  };
+  const report = (reason: Report['reason']) => {
+    setSending(true);
+    getDb().moderation.report({ kind: 'post', target: post.ref, reason })
+      .then(() => { setReporting(false); Alert.alert('Reported', 'Thanks. Moderators review reports within 24 hours. You can also block this person from the ··· menu.'); })
+      .catch(showError('Report failed'))
+      .finally(() => setSending(false));
+  };
 
   return (
     <View style={common.card}>
@@ -56,11 +85,12 @@ export function PostCard({ post, showSensitive, me }: { post: Post; showSensitiv
           <Text style={styles.author}>{name}</Text>
           <Text style={styles.handle}>{handle}  ·  {timeAgo(post.createdAt)}{post.editedAt ? ' · edited' : ''}</Text>
         </View>
-        <Text style={styles.more}>···</Text>
+        <Pressable onPress={menu} hitSlop={12} accessibilityRole="button" accessibilityLabel="Post options"><Text style={styles.more}>···</Text></Pressable>
       </View>
       {post.repostOf ? <Text style={styles.repostLabel}>↗  RELAYED</Text> : null}
       <PostContent post={post} showSensitive={showSensitive} />
       {post.repostOf ? <RepostedPost postRef={post.repostOf} showSensitive={showSensitive} /> : null}
+      {reporting ? <ReportPanel title="Why are you reporting this post?" busy={sending} onPick={report} onCancel={() => setReporting(false)} /> : null}
       <View style={styles.actions}>
         <Pressable onPress={like} hitSlop={10} accessibilityLabel={likes.likedByMe ? 'Unlike' : 'Like'}><Text style={[styles.action, likes.likedByMe && { color: C.pink }]}>{likes.likedByMe ? '♥' : '♡'}  {likes.count}</Text></Pressable>
         <Text style={styles.action}>◌</Text>

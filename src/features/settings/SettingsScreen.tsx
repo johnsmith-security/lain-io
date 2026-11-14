@@ -1,10 +1,11 @@
 import { themedStyles } from '../../theme/themedStyles';
 // Preferences (encrypted, synced settings document on Gun), profile picture, account.
-import React, { useMemo } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useProfile, useSafety, useSession, useSettings } from '../../db/hooks';
 import { getDb, pickAvatar, shortFingerprint, type Settings } from '../../db/native';
-import { showError } from '../../lib/alerts';
+import { errorMessage, showError } from '../../lib/alerts';
+import { LINKS, openLink } from '../../lib/links';
 import { clockTime } from '../../lib/time';
 import { C } from '../../theme/colors';
 import { common } from '../../theme/common';
@@ -24,7 +25,23 @@ export function SettingsScreen() {
   const { id: appTheme, chooseTheme } = useAppTheme();
   const safety = useSafety();
   const openedAt = useMemo(() => clockTime(), []);
+  const [deleting, setDeleting] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deleteBusy, setDeleteBusy] = useState(false);
   if (!session) return null;
+
+  // In-app account deletion (App Store 5.1.1(v), Google Play account deletion policy).
+  const startDelete = () => Alert.alert('Delete your account?', 'This removes your profile, posts, settings, Lain data and messages from Lain IO’s relays and releases your username. It can’t be undone.', [
+    { text: 'Cancel', style: 'cancel' },
+    { text: 'Continue', style: 'destructive', onPress: () => setDeleting(true) },
+  ]);
+  const confirmDelete = async () => {
+    if (!deletePassword) return;
+    setDeleteBusy(true);
+    try { await getDb().deleteAccount(deletePassword); }
+    catch (failure) { Alert.alert('Account not deleted', errorMessage(failure, 'Check your password and try again.')); }
+    finally { setDeleteBusy(false); setDeletePassword(''); }
+  };
 
   const save = (patch: Partial<Omit<Settings, 'updatedAt'>>) => { updateSettings(patch).catch(showError('Settings', 'Could not save.')); };
   const showSensitive = settings?.showSensitiveMedia ?? false;
@@ -82,7 +99,30 @@ export function SettingsScreen() {
         <SettingLink label="About Lain IO" value="Version 1.0.0" />
       </SettingGroup>
 
+      <Eyebrow>SAFETY & LEGAL</Eyebrow>
+      <SettingGroup>
+        <SettingLink label="Community guidelines" value="lain.コム" onPress={() => openLink(LINKS.guidelines)} />
+        <SettingLink label="Child safety standards" value="" onPress={() => openLink(LINKS.childSafety)} />
+        <SettingLink label="Privacy policy" value="" onPress={() => openLink(LINKS.privacy)} />
+        <SettingLink label="Terms of use" value="" onPress={() => openLink(LINKS.terms)} />
+        <SettingLink label="Help & contact" value="" onPress={() => openLink(LINKS.support)} />
+      </SettingGroup>
+
       <Pressable style={styles.signout} onPress={signOut}><Text style={styles.signoutText}>Sign out</Text></Pressable>
+      {deleting ? (
+        <View style={styles.deleteBox}>
+          <Text style={styles.deleteTitle}>Enter your password to delete @{session.username}</Text>
+          <TextInput value={deletePassword} onChangeText={setDeletePassword} placeholder="password" placeholderTextColor={C.muted} secureTextEntry autoCapitalize="none" autoCorrect={false} accessibilityLabel="Password" style={styles.deleteInput} />
+          <View style={styles.deleteActions}>
+            <Pressable style={styles.deleteCancel} onPress={() => { setDeleting(false); setDeletePassword(''); }}><Text style={styles.signoutText}>Cancel</Text></Pressable>
+            <Pressable style={[styles.deleteGo, (!deletePassword || deleteBusy) && { opacity: 0.5 }]} disabled={!deletePassword || deleteBusy} onPress={() => void confirmDelete()}>
+              <Text style={styles.deleteGoText}>{deleteBusy ? 'Deleting…' : 'Delete forever'}</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : (
+        <Pressable style={styles.delete} onPress={startDelete} accessibilityRole="button"><Text style={styles.deleteText}>Delete account</Text></Pressable>
+      )}
       <Text style={styles.foot}>LAIN INPUT / OUTPUT  ·  {openedAt}</Text>
     </ScreenScroll>
   );
@@ -96,5 +136,14 @@ const styles = themedStyles(() => StyleSheet.create({
   photoHint: { fontSize: 7, color: C.cyan, letterSpacing: 1, marginTop: 5 },
   signout: { height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: 12, borderWidth: 1, borderColor: C.lineStrong, marginTop: 3 },
   signoutText: { color: C.pink, fontSize: 11, fontWeight: '600' },
+  delete: { height: 40, alignItems: 'center', justifyContent: 'center', marginTop: 8 },
+  deleteText: { color: C.danger, fontSize: 11 },
+  deleteBox: { marginTop: 10, padding: 14, borderRadius: 13, borderWidth: 1, borderColor: C.danger, backgroundColor: C.panel },
+  deleteTitle: { color: C.ink, fontSize: 12, marginBottom: 8 },
+  deleteInput: { height: 44, borderRadius: 10, borderWidth: 1, borderColor: C.lineStrong, paddingHorizontal: 12, color: C.ink, fontSize: 14, backgroundColor: C.panelDeep },
+  deleteActions: { flexDirection: 'row', gap: 10, marginTop: 10 },
+  deleteCancel: { flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, borderWidth: 1, borderColor: C.lineStrong },
+  deleteGo: { flex: 1, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 10, backgroundColor: C.danger },
+  deleteGoText: { color: C.inverseInk, fontSize: 11, fontWeight: '700' },
   foot: { textAlign: 'center', color: C.muted, fontSize: 8, letterSpacing: 1.4, marginTop: 20 },
 }));

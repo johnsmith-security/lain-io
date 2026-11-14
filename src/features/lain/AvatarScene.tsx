@@ -10,7 +10,7 @@ import { themedStyles } from '../../theme/themedStyles';
 import type { MouthTrack } from './mouth';
 
 // Keep the asset reference static so Metro includes it in the native bundle.
-const LAIN_MODEL_ASSET = require('../../../assets/models/lain.glb');
+const MODEL_ASSET = require('../../../assets/models/lain.glb');
 
 function removeMissingTextureReferences(source: ArrayBuffer): ArrayBuffer {
   const sourceBytes = new Uint8Array(source);
@@ -228,7 +228,7 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
     scene.add(grid);
 
     try {
-      const asset = Asset.fromModule(LAIN_MODEL_ASSET);
+      const asset = Asset.fromModule(MODEL_ASSET);
       await asset.downloadAsync();
       if (!asset.localUri) throw new Error('GLB asset did not resolve to a local file.');
       const fileBytes = await new File(asset.localUri).bytes();
@@ -248,12 +248,12 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
       applyVaporwaveMaterials(model);
       model.updateWorldMatrix(true, true);
       const originalBounds = new THREE.Box3().setFromObject(model);
-      if (originalBounds.isEmpty()) throw new Error('lain.glb loaded without visible geometry.');
+      if (originalBounds.isEmpty()) throw new Error(`Lain model loaded without visible geometry.`);
       let meshCount = 0;
       model.traverse((object) => {
         if ((object as THREE.Mesh).isMesh) meshCount += 1;
       });
-      if (meshCount === 0) throw new Error('lain.glb loaded but contains no renderable meshes.');
+      if (meshCount === 0) throw new Error(`Lain model loaded but contains no renderable meshes.`);
 
       const size = originalBounds.getSize(new THREE.Vector3());
       const center = originalBounds.getCenter(new THREE.Vector3());
@@ -347,7 +347,7 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
       render();
       setIsLoading(false);
     } catch (error) {
-      console.warn('Unable to load lain.glb', error);
+      console.warn('Unable to load Lain model', error);
       setIsLoading(false);
       setLoadError(true);
       setLoadErrorMessage(error instanceof Error ? error.message.slice(0, 100) : String(error).slice(0, 100));
