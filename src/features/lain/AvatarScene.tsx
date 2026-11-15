@@ -8,6 +8,7 @@ import { ActivityIndicator, LayoutChangeEvent, PanResponder, PixelRatio, StyleSh
 import { C } from '../../theme/colors';
 import { themedStyles } from '../../theme/themedStyles';
 import type { MouthTrack } from './mouth';
+import { createIdle } from './idle';
 
 // Keep the asset reference static so Metro includes it in the native bundle.
 const MODEL_ASSET = require('../../../assets/models/lain.glb');
@@ -290,11 +291,7 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
       avatar.add(model);
 
       const clock = new THREE.Clock();
-      const head = model.getObjectByName('頭');
-      const neck = model.getObjectByName('首');
-      const leftArm = model.getObjectByName('腕.L');
-      const rightArm = model.getObjectByName('腕.R');
-      const baseRotations = [head, neck, leftArm, rightArm].map((bone) => bone?.rotation.clone());
+      const idle = createIdle(model);
       const openJaw = jawRig(model);
       if (!openJaw) console.warn('[Lain model] no jaw bone (下顎); she will speak without moving her mouth.');
       let mouthOpen = 0;
@@ -325,14 +322,7 @@ export default function AvatarScene({ animationState = 'ready', stageHeight = 30
         // Opens quickly on a syllable, closes a little slower: reads as speech, not flapping.
         mouthOpen += (target - mouthOpen) * (target > mouthOpen ? 0.6 : 0.3);
         openJaw?.(mouthOpen);
-        if (head && baseRotations[0]) {
-          // A slight lift with each syllable and a slow nod while speaking; listening/thinking tilts.
-          head.rotation.x = baseRotations[0].x + (speaking ? mouthOpen * 0.035 + Math.sin(t * 1.8) * 0.02 : 0);
-          head.rotation.z = baseRotations[0].z + (listening ? -0.12 : thinking ? 0.09 : 0);
-        }
-        if (neck && baseRotations[1]) neck.rotation.z = baseRotations[1].z + (listening ? -0.08 : thinking ? 0.06 : 0);
-        if (leftArm && baseRotations[2]) leftArm.rotation.x = baseRotations[2].x + (speaking ? Math.sin(t * 4) * 0.06 : 0);
-        if (rightArm && baseRotations[3]) rightArm.rotation.x = baseRotations[3].x + (speaking ? Math.sin(t * 4 + 1.2) * 0.06 : 0);
+        idle.update(t, listening ? 'listening' : thinking ? 'thinking' : speaking ? 'speaking' : 'idle', mouthOpen);
         const spin = spinRef.current;
         if (!spin.dragging && spin.velocity !== 0) {
           spin.yaw += spin.velocity;
