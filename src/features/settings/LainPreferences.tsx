@@ -5,14 +5,14 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { C } from '../../theme/colors';
 import { Eyebrow } from '../../ui/Eyebrow';
 
-export type ModelId = 'lain-000' | 'gemma-4-e2b';
+import { MODELS as MODEL_REGISTRY, isInstalled, resolveModel, type LainModelId } from '../../../modules/lain-ai/src';
+
+export type ModelId = LainModelId;
 export type LainLook = 'vaporwave' | 'wired';
 export type LainVoiceEffect = 'wired' | 'clean';
 
-const MODELS = [
-  { id: 'lain-000', name: 'lain-000', tag: 'PERSONAL BASELINE', detail: 'A fresh Lain profile, designed to become more personal over time.' },
-  { id: 'gemma-4-e2b', name: 'Gemma 4 E2B', tag: 'ON-DEVICE ENGINE', detail: 'Runs locally on this device. Private and offline.' },
-] as const;
+const MODELS = Object.values(MODEL_REGISTRY);
+const gb = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
 
 const VOICES = [
   { id: 'wired', icon: '◉', name: 'Through the Wired', sub: 'LINE · ROOM · STATIC' },
@@ -31,14 +31,15 @@ export function ModelChoice({ value, onChange }: { value: ModelId; onChange: (va
       <Text style={styles.hint}>Choose the model profile for your Lain.</Text>
       <View style={styles.models}>
         {MODELS.map((model) => {
-          const selected = value === model.id;
+          const selected = resolveModel(value, isInstalled).id === model.id;
+          const usable = model.available || isInstalled(model);
           return (
-            <Pressable key={model.id} accessibilityRole="radio" accessibilityState={{ selected }} onPress={() => onChange(model.id)} style={[styles.model, selected && styles.modelSelected]}>
+            <Pressable key={model.id} accessibilityRole="radio" accessibilityState={{ selected, disabled: !usable }} disabled={!usable} onPress={() => onChange(model.id)} style={[styles.model, selected && styles.modelSelected, !usable && styles.modelUnavailable]}>
               <View style={styles.modelTop}>
                 <Text style={styles.modelName}>{model.name}</Text>
                 <View style={[styles.radio, selected && styles.radioSelected]}>{selected && <View style={styles.radioInner} />}</View>
               </View>
-              <Text style={styles.modelTag}>{model.tag}</Text>
+              <Text style={styles.modelTag}>{model.available ? `${model.tag} · ${gb(model.bytes)}` : usable ? `${model.tag} · TEST BUILD` : 'COMING SOON'}</Text>
               <Text style={styles.modelDetail}>{model.detail}</Text>
             </Pressable>
           );
@@ -46,7 +47,7 @@ export function ModelChoice({ value, onChange }: { value: ModelId; onChange: (va
       </View>
       <View style={styles.note}>
         <Text style={styles.noteGlyph}>✳</Text>
-        <Text style={styles.noteText}>Personalization is a future feature. This preview does not learn from or save your behavior yet; local chat still uses Gemma 4 E2B.</Text>
+        <Text style={styles.noteText}>Lain is an AI character. Each model is downloaded once and runs only on this device.</Text>
       </View>
     </>
   );
@@ -100,6 +101,7 @@ const styles = themedStyles(() => StyleSheet.create({
   hint: { fontSize: 10, color: C.muted, marginTop: 6, marginBottom: 10 },
   models: { gap: 9, marginBottom: 14 },
   model: { padding: 13, borderRadius: 13, backgroundColor: C.panel, borderWidth: 1, borderColor: C.line },
+  modelUnavailable: { opacity: 0.5 },
   modelSelected: { borderColor: C.pink, backgroundColor: C.panelSelected },
   modelTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   modelName: { fontSize: 13, color: C.ink, fontWeight: '700' },

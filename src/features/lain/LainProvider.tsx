@@ -7,10 +7,10 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { Alert, PermissionsAndroid, TextInput } from 'react-native';
 
 type TextInputHandle = ComponentRef<typeof TextInput>;
-import { GEMMA_MODEL_URL, LAIN_VOICE_URL, LainAi, type VoiceEffect } from '../../../modules/lain-ai/src';
+import { LAIN_VOICE_URL, LainAi, isInstalled, resolveModel, type LainModel, type VoiceEffect } from '../../../modules/lain-ai/src';
 import { useKeyboard } from '../../app/keyboard';
 import { getDb, newId } from '../../db/native';
-import { useLainChat, useSession } from '../../db/hooks';
+import { useLainChat, useSession, useSettings } from '../../db/hooks';
 import { errorMessage } from '../../lib/alerts';
 import { MouthTrack } from './mouth';
 
@@ -22,6 +22,8 @@ export type LainMessage = { id: string; role: 'you' | 'lain'; text: string };
 type LainState = {
   /** False in Expo Go / without the native module. */
   available: boolean;
+  /** The model chosen in Settings (falls back to stock Gemma until the fine-tune is published). */
+  model: LainModel;
   status: LainStatus;
   messages: LainMessage[];
   error: string;
@@ -54,6 +56,10 @@ export function LainProvider({ children }: { children: React.ReactNode }) {
   const keyboard = useKeyboard();
   const [status, setStatusState] = useState<LainStatus>(LainAi ? 'missing' : 'error');
   const session = useSession();
+  const [settings] = useSettings();
+  const model = resolveModel(settings?.selectedModel, isInstalled);
+  const modelRef = useRef(model);
+  modelRef.current = model;
   const saved = useLainChat(session ? CHAT_ID : null);
   // Messages not yet seen back from Gun (just sent, or signed out). Dropped once saved.
   const [local, setLocal] = useState<Array<LainMessage & { at: number }>>([]);
@@ -144,16 +150,17 @@ export function LainProvider({ children }: { children: React.ReactNode }) {
     preparing.current = true;
     try {
       setError('');
-      let stored = LainAi.getModelStatus();
+      const chosen = modelRef.current;
+      let stored = LainAi.getModelStatus(chosen.file);
       if (!stored.downloaded) {
         setStatus('downloading');
         setProgress(0);
-        stored = { ...stored, path: await LainAi.downloadModel(GEMMA_MODEL_URL), downloaded: true, bytes: 0 };
+        stored = { ...stored, path: await LainAi.downloadModel(chosen.url, chosen.file, chosen.sha256 ?? undefined, chosen.name), downloaded: true, bytes: 0 };
       }
       setStatus('loading');
-      const loaded = await LainAi.loadModel(stored.path);
+      const loaded = await LainAi.loadModel(stored.path, chosen.systemPrompt);
       setStatus('ready');
-      if (!quiet) Alert.alert('Lain is connected', `Gemma 4 E2B is ready on the ${loaded.backend}. You can chat offline.`);
+      if (!quiet) Alert.alert('Lain is connected', `${chosen.name} is ready on the ${loaded.backend}. You can chat offline.`);
     } catch (failure) {
       console.error('[Lain AI] Model download or initialization failed', failure);
       setError(errorMessage(failure, 'The model could not be prepared.').slice(0, 180));
@@ -165,13 +172,19 @@ export function LainProvider({ children }: { children: React.ReactNode }) {
 
   // Once the user has loaded Lain, keep her loaded: reuse an engine that is already in
   // memory, otherwise load it again quietly whenever the app opens.
+  // Switching model in Settings swaps the engine (the chat history is kept).
   useEffect(() => {
-    const stored = LainAi?.getModelStatus();
-    if (!stored?.downloaded) return;
+    if (!LainAi) return;
+    const stored = LainAi.getModelStatus(model.file);
+    if (!stored.downloaded) {
+      if (stored.loadedPath) void LainAi.unloadModel();
+      setStatus('missing');
+      return;
+    }
     if (stored.loaded) setStatus('ready');
-    else if (stored.autoLoad) void prepare({ quiet: true });
+    else if (stored.autoLoad || stored.loadedPath) void prepare({ quiet: true });
     else setStatus('downloaded');
-  }, [prepare, setStatus]);
+  }, [prepare, setStatus, model.file]);
 
   const toggleListening = useCallback(async () => {
     if (!LainAi) return;
@@ -214,9 +227,9 @@ export function LainProvider({ children }: { children: React.ReactNode }) {
   const setVoiceEffect = useCallback((effect: VoiceEffect) => { LainAi?.setVoiceEffect?.(effect); }, []);
 
   const value = useMemo<LainState>(() => ({
-    available: Boolean(LainAi), status, messages, error, progress, draft, setDraft, composerRef, send, prepare, toggleListening,
+    available: Boolean(LainAi), model, status, messages, error, progress, draft, setDraft, composerRef, send, prepare, toggleListening,
     voice, voiceProgress, downloadVoice, setVoiceEffect, mouth,
-  }), [status, messages, error, progress, draft, send, prepare, toggleListening, voice, voiceProgress, downloadVoice, setVoiceEffect, mouth]);
+  }), [model, status, messages, error, progress, draft, send, prepare, toggleListening, voice, voiceProgress, downloadVoice, setVoiceEffect, mouth]);
   return <LainContext.Provider value={value}>{children}</LainContext.Provider>;
 }
 

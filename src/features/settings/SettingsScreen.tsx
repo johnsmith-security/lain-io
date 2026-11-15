@@ -77,7 +77,7 @@ export function SettingsScreen() {
         <Text style={rows.chevron}>›</Text>
       </Pressable>
 
-      <ModelChoice value={(settings?.selectedModel ?? 'lain-000') as ModelId} onChange={(selectedModel) => save({ selectedModel })} />
+      <ModelChoice value={(settings?.selectedModel ?? 'lain-e2b') as ModelId} onChange={(selectedModel) => save({ selectedModel })} />
       <ThemeChoice value={appTheme} onChange={(appTheme) => { chooseTheme(appTheme).catch(showError('Theme', 'Could not save.')); }} />
       <LookChoice value={settings?.lainStyle ?? 'vaporwave'} onChange={(lainStyle) => save({ lainStyle })} />
       <VoiceChoice value={settings?.lainVoice ?? 'wired'} onChange={(lainVoice) => save({ lainVoice })} />

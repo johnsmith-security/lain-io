@@ -69,7 +69,7 @@ function ModelCard({ hidden }: { hidden: boolean }) {
         <View style={{ flex: 1 }}>
           <Eyebrow>LOCAL INTELLIGENCE</Eyebrow>
           <Text style={styles.cardTitle}>Talk to Lain</Text>
-          <Text style={styles.cardCopy}>Gemma 4 E2B runs on this device. Your conversation stays here.</Text>
+          <Text style={styles.cardCopy}>Lain is an AI character. {lain.model.name} runs on this device, and your conversation stays here.</Text>
         </View>
         <View style={styles.pulse}><Text style={styles.pulseText}>✳</Text></View>
       </View>

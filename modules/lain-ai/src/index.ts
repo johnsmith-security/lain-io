@@ -8,15 +8,18 @@ export type VoiceEffect = 'wired' | 'clean';
 export type NativeSpeechState = { state: 'idle' | 'listening' | 'processing' | 'speaking' };
 
 type LainAiNative = {
-  getModelStatus(): {
+  /** `fileName` picks the model (see models.ts); omitted = stock Gemma. */
+  getModelStatus(fileName?: string): {
     downloaded: boolean; path: string; bytes: number;
-    /** The engine is already in memory (e.g. the JS reloaded but the process didn't). */
-    loaded: boolean; backend: 'GPU' | 'CPU' | null;
+    /** This model's engine is already in memory (e.g. the JS reloaded but the process didn't). */
+    loaded: boolean; loadedPath: string | null; backend: 'GPU' | 'CPU' | null;
     /** The user loaded the model before, so load it whenever the app opens. */
     autoLoad: boolean;
   };
-  downloadModel(url: string): Promise<string>;
-  loadModel(path: string): Promise<{ ready: boolean; backend: 'GPU' | 'CPU' }>;
+  /** Resumable; with `sha256`, a damaged download is deleted and rejected. Optional args need a native build from 2026-11-15. */
+  downloadModel(url: string, fileName?: string, sha256?: string, label?: string): Promise<string>;
+  deleteModel?(fileName: string): Promise<boolean>;
+  loadModel(path: string, systemPrompt?: string): Promise<{ ready: boolean; backend: 'GPU' | 'CPU' }>;
   generate(prompt: string): Promise<string>;
   unloadModel(): Promise<boolean>;
   /** Lain's neural voice (Kokoro, ~103 MB). Until it is installed, speak() uses the Android system voice. */
@@ -36,3 +39,9 @@ export const GEMMA_MODEL_URL = 'https://huggingface.co/litert-community/gemma-4-
 /** Kokoro-82M int8, English, packaged for sherpa-onnx (Apache-2.0). */
 export const LAIN_VOICE_URL = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-en-v0_19.tar.bz2';
 export const LainAi = nativeModule;
+export * from './models';
+import type { LainModel } from './models';
+/** True when the model's file is on the device (downloaded or sideloaded). */
+export const isInstalled = (model: LainModel): boolean => {
+  try { return Boolean(nativeModule?.getModelStatus(model.file).downloaded); } catch { return false; }
+};

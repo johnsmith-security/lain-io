@@ -10,7 +10,7 @@ export const DEFAULT_SETTINGS: Settings = {
   appTheme: 'wired',
   lainStyle: 'vaporwave',
   lainVoice: 'wired',
-  selectedModel: 'lain-000',
+  selectedModel: 'lain-e2b',
   privatePresence: true,
   quietMode: false,
   showActivity: true,
